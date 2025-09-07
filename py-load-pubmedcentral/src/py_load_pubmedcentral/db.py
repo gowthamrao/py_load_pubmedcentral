@@ -51,6 +51,11 @@ class DatabaseAdapter(ABC):
         """Update the synchronization state in the database."""
         raise NotImplementedError
 
+    @abstractmethod
+    def execute_sql(self, sql_statement: str):
+        """Execute a raw SQL statement."""
+        raise NotImplementedError
+
 
 class PostgreSQLAdapter(DatabaseAdapter):
     """Database adapter for PostgreSQL."""
@@ -112,7 +117,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
     def bulk_load_native(self, file_path: str, target_table: str):
         """
         Loads data into a PostgreSQL table from a TSV file path
-        using the COPY command.
+        using the COPY command. This is highly efficient.
 
         Args:
             file_path: The path to the TSV file to load.
@@ -121,17 +126,16 @@ class PostgreSQLAdapter(DatabaseAdapter):
         if not self.conn:
             self.connect()
 
-        sql = f"COPY {target_table} FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')"
+        # SQL statement for bulk loading from STDIN
+        sql = f"COPY {target_table} FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
 
-        with self.conn.cursor() as cursor, open(file_path, "r", encoding="utf-8") as f:
-            # The psycopg2.copy_expert method is powerful but requires care.
-            # It's a placeholder here since we cannot execute it.
-            print(f"Executing: {sql}")
-            print(f"Streaming data from '{file_path}' to PostgreSQL table '{target_table}'...")
-            # In a real scenario, this would be:
-            # cursor.copy_expert(sql, f)
-            # self.conn.commit()
-            pass
+        with self.conn.cursor() as cursor:
+            with open(file_path, "r", encoding="utf-8") as f:
+                # copy_expert is the most flexible and powerful way to use COPY
+                cursor.copy_expert(sql, f)
+
+        # Commit the transaction to make the changes persistent
+        self.conn.commit()
 
     def execute_upsert(self, staging_table: str, main_table: str):
         """
@@ -149,3 +153,17 @@ class PostgreSQLAdapter(DatabaseAdapter):
         """(Placeholder) Updates the sync_history table."""
         print(f"Updating state with last processed file: {last_file_processed}")
         pass
+
+    def execute_sql(self, sql_statement: str):
+        """Executes a multi-statement SQL string."""
+        if not self.conn:
+            self.connect()
+        with self.conn.cursor() as cursor:
+            cursor.execute(sql_statement)
+        self.conn.commit()
+
+    def close(self):
+        """Closes the database connection."""
+        if self.conn:
+            self.conn.close()
+            self.conn = None
