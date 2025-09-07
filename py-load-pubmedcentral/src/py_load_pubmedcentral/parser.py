@@ -38,12 +38,12 @@ def _extract_ids(article_element: etree._Element) -> dict:
     ids = {"pmcid": None, "pmid": None, "doi": None}
     for article_id in article_element.findall(".//front/article-meta/article-id"):
         id_type = article_id.get("pub-id-type")
-        if id_type in ids:
-            ids[id_type] = article_id.text
-    # PMCID is critical, often found in the filename but should be in the doc.
-    if not ids.get("pmcid"):
-        # Fallback if needed, though usually it's there.
-        pass
+        if id_type == "pmc":
+            ids["pmcid"] = article_id.text
+        elif id_type == "pmid":
+            ids["pmid"] = article_id.text
+        elif id_type == "doi":
+            ids["doi"] = article_id.text
     return ids
 
 
@@ -73,27 +73,24 @@ def _extract_contributors(article_element: etree._Element) -> list[Contributor]:
 
 def parse_jats_xml(
     xml_file: IO[bytes],
-    source_last_updated: Optional[datetime],
     is_retracted: bool,
 ) -> Generator[Tuple[PmcArticlesMetadata, PmcArticlesContent], None, None]:
     """
     Parses a JATS XML file (or file-like object) and yields data models.
 
     This function is a generator that uses `lxml.iterparse` to process the XML
-    incrementally, keeping memory usage low.
+    incrementally, keeping memory usage low. The caller is responsible for
+    populating the `source_last_updated` field on the yielded metadata model.
 
     Args:
         xml_file: A file-like object opened in binary mode.
-        source_last_updated: The timestamp from the source metadata.
         is_retracted: The retraction status from the source metadata.
-
 
     Yields:
         A tuple containing (PmcArticlesMetadata, PmcArticlesContent) for each
         <article> element found in the input stream.
     """
     context = etree.iterparse(xml_file, events=("end",), tag="article", recover=True)
-
     for event, elem in context:
         try:
             # --- Extract Metadata ---
@@ -151,7 +148,7 @@ def parse_jats_xml(
                 contributors=_extract_contributors(elem),
                 license_info=license_info,
                 is_retracted=is_retracted,
-                source_last_updated=source_last_updated,
+                source_last_updated=None,  # Caller must populate this
                 sync_timestamp=datetime.utcnow(),
             )
 
@@ -169,9 +166,9 @@ def parse_jats_xml(
             # The 'recover=True' in iterparse helps, but we add this for safety.
             continue
         finally:
-            # Clear the element and its ancestors to free memory
+            # It's crucial to clear the element to free memory.
+            # The ancestor-clearing part is complex and can be fragile.
+            # elem.clear() is the most important part.
             elem.clear()
-            while elem.getprevious() is not None:
-                del elem.getparent()[0]
 
     del context

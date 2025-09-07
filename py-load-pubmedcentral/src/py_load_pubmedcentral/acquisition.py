@@ -30,16 +30,6 @@ class DataSource(ABC):
     """Abstract Base Class for a data source (e.g., FTP, S3)."""
 
     @abstractmethod
-    def list_baseline_files(self) -> List[str]:
-        """
-        Lists the URLs of the baseline (full) dataset archives.
-
-        Returns:
-            A list of URLs pointing to the .tar.gz files.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def get_article_file_list(self) -> List[ArticleFileInfo]:
         """
         Retrieves the complete list of article packages and their metadata.
@@ -121,19 +111,6 @@ class NcbiFtpDataSource(DataSource):
             print(f"Failed to download file list: {e}")
             # Depending on desired robustness, could implement retries here
             return []
-
-    def list_baseline_files(self) -> List[str]:
-        """
-        Provides a list of full URLs to all article package archives.
-
-        This implementation uses the master file list as the source of truth.
-        """
-        article_infos = self.get_article_file_list()
-
-        # The file paths in the CSV are relative to the FTP root's /pub/pmc/
-        # e.g., 'oa_package/a5/39/PMC10534341.tar.gz'
-        # We construct the full URL for each.
-        return [urljoin(self.BASE_URL, info.file_path) for info in article_infos]
 
     def download_file(self, url: str, destination_dir: Path) -> Path:
         """
@@ -252,36 +229,6 @@ class S3DataSource(DataSource):
             print(f"Failed to download file list from S3: {e}")
             return []
 
-    def list_baseline_files(self) -> List[str]:
-        """
-        Lists the S3 keys of all baseline .tar.gz archives in the bucket.
-
-        This uses a paginator to efficiently handle the large number of
-        objects in the PMC S3 bucket.
-
-        Returns:
-            A list of S3 object keys for all .tar.gz files found.
-        """
-        print(f"Listing baseline .tar.gz files in S3 bucket: {self.BUCKET_NAME}...")
-        baseline_files = []
-        try:
-            paginator = self.s3.get_paginator("list_objects_v2")
-            pages = paginator.paginate(Bucket=self.BUCKET_NAME)
-
-            for page in pages:
-                if "Contents" in page:
-                    for obj in page["Contents"]:
-                        key = obj["Key"]
-                        if key.lower().endswith(".tar.gz"):
-                            baseline_files.append(key)
-
-            print(f"Found {len(baseline_files)} baseline files.")
-            return baseline_files
-
-        except ClientError as e:
-            print(f"Failed to list files in S3 bucket: {e}")
-            return []
-
     def download_file(self, url: str, destination_dir: Path) -> Path:
         """
         Downloads a file from S3, verifies its integrity using server-side
@@ -324,44 +271,50 @@ import re
 
 def stream_and_parse_tar_gz_archive(
     tar_gz_path: Path,
-    source_last_updated: Optional[datetime],
-    is_retracted: bool,
+    article_info_lookup: dict[str, ArticleFileInfo],
 ) -> Generator[Tuple[PmcArticlesMetadata, PmcArticlesContent], None, None]:
     """
-    Opens a local .tar.gz archive, extracts XML files in memory,
-    and parses them, yielding data models for each article.
+    Opens a local .tar.gz archive, finds XML files for target articles,
+    parses them, and yields data models.
 
-    This function streams the archive extraction to keep memory usage low.
+    This function streams the archive extraction. It parses each article,
+    checks if its PMCID is in the lookup, and if so, enriches the article
+    with metadata from the lookup (like the correct `source_last_updated`
+    timestamp) before yielding it.
 
     Args:
         tar_gz_path: The local path to the .tar.gz archive to process.
-        source_last_updated: The timestamp from the source metadata.
-        is_retracted: The retraction status from the source metadata.
+        article_info_lookup: A dictionary mapping PMCID to ArticleFileInfo.
+                             This determines which articles to process and provides
+                             their metadata.
 
     Yields:
-        A tuple of (PmcArticlesMetadata, PmcArticlesContent) for each
-        article found and successfully parsed in the archive.
+        A tuple of (PmcArticlesMetadata, PmcArticlesContent) for each targeted
+        and successfully parsed article in the archive.
     """
-    # tarfile can open a file path directly and will handle decompression.
     with tarfile.open(name=tar_gz_path, mode="r|gz") as tar:
-        # Iterate through each member (file) in the tar archive
         for member in tar:
             if member.isfile() and member.name.lower().endswith((".xml", ".nxml")):
-                # extractfile() returns a file-like object for reading the member's content.
-                # This is read into memory, but only one file at a time.
                 xml_file_obj = tar.extractfile(member)
-                if xml_file_obj:
-                    try:
-                        # The parser expects a file-like object, which we have.
-                        # We 'yield from' to pass on the generator's output.
-                        yield from parse_jats_xml(
-                            xml_file_obj,
-                            source_last_updated=source_last_updated,
-                            is_retracted=is_retracted,
-                        )
-                    except etree.XMLSyntaxError as e:
-                        # Log the error for the specific file and continue
-                        print(f"Skipping malformed XML file {member.name}: {e}")
-                        continue
-                    finally:
-                        xml_file_obj.close()
+                if not xml_file_obj:
+                    continue
+
+                try:
+                    # We parse the XML, then decide if we want to keep it.
+                    # This is more robust than relying on filenames.
+                    for metadata, content in parse_jats_xml(xml_file_obj, is_retracted=False):
+                        # Check if the parsed article is one we're looking for
+                        if metadata.pmcid in article_info_lookup:
+                            article_info = article_info_lookup[metadata.pmcid]
+                            # Populate the metadata from our source of truth
+                            metadata.source_last_updated = article_info.last_updated
+                            # FRD implies retractions are handled via a separate file
+                            # For now, we assume articles in the main list aren't retracted
+                            metadata.is_retracted = False
+                            yield metadata, content
+
+                except etree.XMLSyntaxError as e:
+                    print(f"Skipping malformed XML file {member.name}: {e}")
+                    continue
+                finally:
+                    xml_file_obj.close()
