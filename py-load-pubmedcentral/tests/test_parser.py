@@ -94,9 +94,8 @@ def test_parse_jats_xml_incomplete_article():
     assert metadata.contributors[0].affiliation is None
     assert metadata.contributors[0].orcid is None
 
-    # License Info
-    assert metadata.license_info.license_type is None
-    assert metadata.license_info.url is None
+    # License Info (the whole object should be None)
+    assert metadata.license_info is None
 
     # Content
     assert content.pmcid == "PMC67890"

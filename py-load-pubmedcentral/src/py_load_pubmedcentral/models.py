@@ -44,7 +44,7 @@ class PmcArticlesMetadata(BaseModel):
     publication_date: Optional[date] = Field(None, description="Date of publication.")
     journal_info: JournalInfo = Field(..., description="Nested structure for Journal Name, ISSN, Publisher.")
     contributors: List[Contributor] = Field(..., description="Array of objects: Author Name, Affiliation, ORCID.")
-    license_info: LicenseInfo = Field(..., description="Details of the OA license.")
+    license_info: Optional[LicenseInfo] = Field(None, description="Details of the OA license.")
     is_retracted: bool = Field(..., description="Flag based on NCBI metadata file.")
     source_last_updated: Optional[datetime] = Field(None, description="Timestamp provided by NCBI source.")
     sync_timestamp: datetime = Field(..., description="Timestamp when this record was last synchronized.")
