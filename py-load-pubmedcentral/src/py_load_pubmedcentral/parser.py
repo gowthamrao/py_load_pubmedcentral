@@ -123,13 +123,15 @@ def parse_jats_xml(
             )
 
             # License Info
+            license_info = None
             permissions = meta.find("permissions")
-            license_info = LicenseInfo()
             if permissions is not None:
                 license_element = permissions.find("license")
                 if license_element is not None:
-                    license_info.license_type = license_element.get("license-type")
-                    license_info.url = license_element.get("{http://www.w3.org/1999/xlink}href")
+                    license_info = LicenseInfo(
+                        type=license_element.get("license-type"),
+                        url=license_element.get("{http://www.w3.org/1999/xlink}href"),
+                    )
 
 
             # --- Construct Models ---
