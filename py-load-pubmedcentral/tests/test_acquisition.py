@@ -1,12 +1,36 @@
 import hashlib
-import re
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import requests
 
 from py_load_pubmedcentral.acquisition import NcbiFtpDataSource
+
+class MockResponse:
+    def __init__(self, content, status_code=200):
+        self._content = content
+        self.status_code = status_code
+        self.text = self._content.decode('utf-8') if isinstance(self._content, bytes) else self._content
+
+    def iter_content(self, chunk_size=8192):
+        for i in range(0, len(self._content), chunk_size):
+            yield self._content[i:i + chunk_size]
+
+    def iter_lines(self):
+        for line in self.text.splitlines():
+            yield line.encode("utf-8")
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"HTTP Error {self.status_code}")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 
 @pytest.fixture
@@ -16,36 +40,32 @@ def mock_requests_get():
         yield mock_get
 
 
-@pytest.fixture
-def sample_html_listing():
-    """Provides a sample HTML directory listing."""
-    return """
-    <html><body>
-    <a href="other_file.txt">other_file.txt</a>
-    <a href="oa_comm_xml.baseline.2023-12-12.tar.gz">oa_comm_xml.baseline.2023-12-12.tar.gz</a>
-    <a href="oa_comm_xml.incr.2024-01-01.tar.gz">oa_comm_xml.incr.2024-01-01.tar.gz</a>
-    <a href="oa_comm_xml.baseline.2024-06-15.tar.gz">oa_comm_xml.baseline.2024-06-15.tar.gz</a>
-    </body></html>
+def test_get_article_file_list(mock_requests_get):
     """
+    Tests that the data source can correctly parse the CSV file list.
+    """
+    # Load the sample CSV content
+    sample_csv_path = Path(__file__).parent / "sample_oa_file_list.csv"
+    with open(sample_csv_path, "rb") as f:
+        sample_csv_content = f.read()
 
-
-def test_list_baseline_files(mock_requests_get, sample_html_listing):
-    """
-    Tests that the data source can correctly parse an HTML directory listing
-    and return only the baseline file URLs.
-    """
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.content = sample_html_listing.encode("utf-8")
-    mock_requests_get.return_value = mock_response
+    # Mock the response from requests.get
+    mock_requests_get.return_value = MockResponse(sample_csv_content)
 
     data_source = NcbiFtpDataSource()
-    baseline_files = data_source.list_baseline_files()
+    article_list = data_source.get_article_file_list()
 
-    assert len(baseline_files) == 2
-    assert "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/xml/oa_comm_xml.baseline.2023-12-12.tar.gz" in baseline_files
-    assert "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/xml/oa_comm_xml.baseline.2024-06-15.tar.gz" in baseline_files
-    assert "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_bulk/oa_comm/xml/oa_comm_xml.incr.2024-01-01.tar.gz" not in baseline_files
+    assert len(article_list) == 2
+
+    # Check the first record
+    assert article_list[0].file_path == "oa_package/a5/39/PMC12345.tar.gz"
+    assert article_list[0].pmcid == "PMC12345"
+    assert article_list[0].pmid == "98765"
+    assert article_list[0].last_updated == datetime(2023, 1, 15, 10, 0, 0)
+
+    # Check the second record (with a missing PMID)
+    assert article_list[1].pmcid == "PMC67890"
+    assert article_list[1].pmid is None
 
 
 def test_download_file_success(mock_requests_get, tmp_path):
@@ -58,15 +78,10 @@ def test_download_file_success(mock_requests_get, tmp_path):
     url = "https://fake.host/test_file.tar.gz"
 
     # Set up multiple return values for requests.get
-    mock_tar_response = MagicMock()
-    mock_tar_response.status_code = 200
-    mock_tar_response.iter_content.return_value = [file_content]
-
-    mock_md5_response = MagicMock()
-    mock_md5_response.status_code = 200
-    mock_md5_response.text = md5_content
-
-    mock_requests_get.side_effect = [mock_tar_response, mock_md5_response]
+    mock_requests_get.side_effect = [
+        MockResponse(file_content),
+        MockResponse(md5_content.encode("utf-8"))
+    ]
 
     data_source = NcbiFtpDataSource()
     destination_path = data_source.download_file(url, tmp_path)
@@ -83,20 +98,14 @@ def test_download_file_checksum_failure(mock_requests_get, tmp_path):
     Tests that an IOError is raised when the checksum verification fails.
     """
     file_content = b"This is a test file."
-    correct_hash = hashlib.md5(file_content).hexdigest()
     incorrect_hash = "0" * 32
     md5_content = f"MD5(test_file.tar.gz)= {incorrect_hash}"
     url = "https://fake.host/test_file.tar.gz"
 
-    mock_tar_response = MagicMock()
-    mock_tar_response.status_code = 200
-    mock_tar_response.iter_content.return_value = [file_content]
-
-    mock_md5_response = MagicMock()
-    mock_md5_response.status_code = 200
-    mock_md5_response.text = md5_content
-
-    mock_requests_get.side_effect = [mock_tar_response, mock_md5_response]
+    mock_requests_get.side_effect = [
+        MockResponse(file_content),
+        MockResponse(md5_content.encode("utf-8"))
+    ]
 
     data_source = NcbiFtpDataSource()
 

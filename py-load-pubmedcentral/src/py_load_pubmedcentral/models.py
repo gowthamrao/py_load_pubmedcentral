@@ -58,3 +58,12 @@ class PmcArticlesContent(BaseModel):
     pmcid: str = Field(..., description="Foreign Key to pmc_metadata. Primary Key.")
     raw_jats_xml: str = Field(..., description="The complete, original JATS XML source.")
     body_text: Optional[str] = Field(None, description="Extracted, cleaned full text from the <body>.")
+
+
+class ArticleFileInfo(BaseModel):
+    """Represents metadata for a single article archive from the NCBI file list."""
+
+    file_path: str
+    pmcid: str
+    pmid: Optional[str] = None
+    last_updated: Optional[datetime] = None

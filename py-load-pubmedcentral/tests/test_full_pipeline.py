@@ -12,6 +12,7 @@ environment variables to be set for the test database:
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from py_load_pubmedcentral.cli import app
+from py_load_pubmedcentral.models import ArticleFileInfo
 from py_load_pubmedcentral.utils import get_db_adapter
 
 # Create a CliRunner instance to invoke the CLI commands
@@ -65,8 +67,18 @@ def test_full_pipeline_end_to_end(mock_data_source, db_adapter):
     """
     # --- 1. Configure the Mock ---
     mock_instance = mock_data_source.return_value
-    # Simulate finding one baseline file
-    mock_instance.list_baseline_files.return_value = ["https://fake.host/test_archive.tar.gz"]
+
+    # Create mock ArticleFileInfo objects
+    test_update_date = datetime(2023, 5, 10, 15, 30, 0)
+    mock_article_info = ArticleFileInfo(
+        file_path="fake_dir/test_archive.tar.gz",
+        pmcid="PMC_Test", # This PMCID is for the package, not the articles inside
+        pmid=None,
+        last_updated=test_update_date
+    )
+
+    # Simulate finding one article file
+    mock_instance.get_article_file_list.return_value = [mock_article_info]
     # Simulate a successful download, returning the path to our local test file
     mock_instance.download_file.return_value = TEST_ARCHIVE_PATH
 
@@ -79,7 +91,7 @@ def test_full_pipeline_end_to_end(mock_data_source, db_adapter):
     # --- 3. Run Full Load ---
     load_result = runner.invoke(app, ["full-load"])
     assert load_result.exit_code == 0
-    assert "Found 1 baseline archives to process" in load_result.stdout
+    assert "Found 1 article archives to process" in load_result.stdout
     assert "Full baseline load process finished successfully" in load_result.stdout
 
     # --- 4. Verification ---
@@ -90,9 +102,15 @@ def test_full_pipeline_end_to_end(mock_data_source, db_adapter):
         cursor.execute("SELECT COUNT(*) FROM pmc_articles_content;")
         assert cursor.fetchone()[0] == 2
 
-        # Check for a specific record
-        cursor.execute("SELECT title FROM pmc_articles_metadata WHERE pmcid = 'PMC12345';")
-        assert cursor.fetchone()[0] == "A Comprehensive Test of the JATS Parser"
+        # Check for a specific record, including the new fields
+        cursor.execute(
+            "SELECT title, is_retracted, source_last_updated FROM pmc_articles_metadata WHERE pmcid = 'PMC12345';"
+        )
+        record = cursor.fetchone()
+        assert record[0] == "A Comprehensive Test of the JATS Parser"
+        assert record[1] is False  # is_retracted was hardcoded to False in the CLI
+        # Make timezone-aware for comparison if needed, but for now we assume UTC
+        assert record[2].replace(tzinfo=None) == test_update_date
 
         # Check sync_history table
         cursor.execute("SELECT run_type, status, metrics->>'files_processed' FROM sync_history;")

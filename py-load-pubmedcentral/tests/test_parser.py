@@ -2,7 +2,7 @@
 Unit tests for the JATS XML parser.
 """
 import io
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 # Although we can't run pytest, we write the tests as if we could.
@@ -18,8 +18,10 @@ def test_parse_jats_xml_comprehensive_article():
     """
     Tests that a well-formed article with all fields is parsed correctly.
     """
+    test_date = datetime(2023, 1, 1, 12, 0, 0)
     with open(TEST_XML_PATH, "rb") as f:
-        results = list(parse_jats_xml(f))
+        content = f.read()
+    results = list(parse_jats_xml(io.BytesIO(content), source_last_updated=test_date, is_retracted=True))
 
     # Check that two articles were parsed
     assert len(results) == 2
@@ -36,7 +38,9 @@ def test_parse_jats_xml_comprehensive_article():
     assert metadata.title == "A Comprehensive Test of the JATS Parser"
     assert "This is the abstract." in metadata.abstract_text
     assert metadata.publication_date == date(2025, 9, 1)
-    assert not metadata.is_retracted
+    # Check new fields
+    assert metadata.is_retracted is True
+    assert metadata.source_last_updated == test_date
 
     # Journal Info
     assert metadata.journal_info.name == "Journal of Test Medicine"
@@ -64,8 +68,10 @@ def test_parse_jats_xml_incomplete_article():
     """
     Tests that an article with missing fields is parsed gracefully.
     """
+    test_date = datetime(2023, 2, 1, 12, 0, 0)
     with open(TEST_XML_PATH, "rb") as f:
-        results = list(parse_jats_xml(f))
+        content = f.read()
+    results = list(parse_jats_xml(io.BytesIO(content), source_last_updated=test_date, is_retracted=False))
 
     # Check that two articles were parsed
     assert len(results) == 2
@@ -82,6 +88,9 @@ def test_parse_jats_xml_incomplete_article():
     assert metadata.title == "An Article with Missing Fields"
     assert metadata.abstract_text is None
     assert metadata.publication_date == date(2024, 1, 1) # Defaults month/day to 1
+    # Check new fields
+    assert metadata.is_retracted is False
+    assert metadata.source_last_updated == test_date
 
     # Journal Info
     assert metadata.journal_info.name == "Journal of Incomplete Data"
@@ -106,25 +115,27 @@ def test_parser_is_a_generator():
     """
     Tests that the parser functions as a generator to keep memory usage low.
     """
+    test_date = datetime(2023, 3, 1, 12, 0, 0)
     with open(TEST_XML_PATH, "rb") as f:
-        parser = parse_jats_xml(f)
+        content = f.read()
+    parser = parse_jats_xml(io.BytesIO(content), source_last_updated=test_date, is_retracted=False)
 
-        # Check that it's a generator
-        assert hasattr(parser, '__next__')
+    # Check that it's a generator
+    assert hasattr(parser, '__next__')
 
-        # Pull one item
-        metadata, content = next(parser)
-        assert metadata.pmcid == "PMC12345"
+    # Pull one item
+    metadata, content = next(parser)
+    assert metadata.pmcid == "PMC12345"
 
-        # Pull the next
-        metadata, content = next(parser)
-        assert metadata.pmcid == "PMC67890"
+    # Pull the next
+    metadata, content = next(parser)
+    assert metadata.pmcid == "PMC67890"
 
-        # Should be exhausted now
-        try:
-            next(parser)
-            # This line should not be reached
-            assert False, "Parser should be exhausted after two articles."
-        except StopIteration:
-            # This is the expected outcome
-            pass
+    # Should be exhausted now
+    try:
+        next(parser)
+        # This line should not be reached
+        assert False, "Parser should be exhausted after two articles."
+    except StopIteration:
+        # This is the expected outcome
+        pass
