@@ -6,6 +6,7 @@ from __future__ import annotations
 import tarfile
 import hashlib
 import csv
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -75,46 +76,46 @@ class NcbiFtpDataSource(DataSource):
         """
         Downloads and parses the master file list (oa_file_list.csv) from
         the NCBI FTP server to get metadata for all article packages.
-        This implementation is robust to changes in column order.
+        This implementation is robust to changes in column order by using
+        csv.DictReader.
         """
         print(f"Downloading master file list from {self.FILE_LIST_URL}...")
         try:
             response = requests.get(self.FILE_LIST_URL, stream=True)
             response.raise_for_status()
+            # Use iter_lines and decode to handle streaming text
             lines = (line.decode('utf-8') for line in response.iter_lines())
-            reader = csv.reader(lines)
-
-            header = [h.strip() for h in next(reader)]
-            print(f"Parsing CSV with header: {header}")
-
-            # Find column indices dynamically
-            col_map = {name: idx for idx, name in enumerate(header)}
-            file_idx = col_map.get("File")
-            pmcid_idx = col_map.get("Accession ID")
-            pmid_idx = col_map.get("PMID")
-            updated_idx = col_map.get("Last Updated")
-            retracted_idx = col_map.get("Retracted") # Added this
-
-            if file_idx is None or pmcid_idx is None:
-                raise ValueError("Required columns 'File' or 'Accession ID' not found in CSV header.")
+            # Use DictReader for robust column handling
+            reader = csv.DictReader(lines)
 
             file_list = []
             for row in reader:
                 try:
-                    is_retracted = False
-                    if retracted_idx is not None and len(row) > retracted_idx:
-                         # Check for common truthy values for retraction status
-                        is_retracted = row[retracted_idx].lower() in ('true', 'y', 'yes')
+                    # Normalize keys by stripping whitespace
+                    row = {k.strip(): v for k, v in row.items()}
 
+                    # Check for required fields
+                    if not row.get("File") or not row.get("Accession ID"):
+                        print(f"Skipping malformed row (missing required fields): {row}")
+                        continue
+
+                    is_retracted = row.get("Retracted", "").lower() in ('true', 'y', 'yes')
+                    last_updated_str = row.get("Last Updated")
+                    last_updated = (
+                        datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M:%S")
+                        if last_updated_str else None
+                    )
+
+                    pmid = row.get("PMID")
                     file_info = ArticleFileInfo(
-                        file_path=row[file_idx],
-                        pmcid=row[pmcid_idx],
-                        pmid=row[pmid_idx] if pmid_idx is not None and len(row) > pmid_idx and row[pmid_idx].strip() else None,
-                        last_updated=datetime.strptime(row[updated_idx], "%Y-%m-%d %H:%M:%S") if updated_idx is not None and len(row) > updated_idx and row[updated_idx] else None,
+                        file_path=row["File"],
+                        pmcid=row["Accession ID"],
+                        pmid=pmid if pmid else None,
+                        last_updated=last_updated,
                         is_retracted=is_retracted,
                     )
                     file_list.append(file_info)
-                except (IndexError, ValueError, TypeError) as e:
+                except (ValueError, TypeError) as e:
                     print(f"Skipping malformed row {row}: {e}")
                     continue
 
@@ -133,16 +134,19 @@ class NcbiFtpDataSource(DataSource):
         try:
             response = requests.get(self.RETRACTIONS_URL)
             response.raise_for_status()
-            reader = csv.reader(response.text.strip().splitlines())
+            response.encoding = 'utf-8'  # Ensure correct decoding
+            lines = response.text.strip().splitlines()
+            reader = csv.reader(lines)
 
-            # Skip header if it exists
+            # Check for a header and skip it
             header = next(reader)
             if 'PMCID' not in header[0]:
-                # If no header, reset reader
-                response.encoding = 'utf-8' # ensure correct decoding
-                reader = csv.reader(response.text.strip().splitlines())
+                # If no header, process the first line as data
+                return [header[0]] + [row[0] for row in reader if row]
+            else:
+                # If header exists, just process the rest
+                return [row[0] for row in reader if row]
 
-            return [row[0] for row in reader if row]
         except requests.RequestException as e:
             print(f"Failed to download retractions file: {e}")
             return []
@@ -221,43 +225,42 @@ class S3DataSource(DataSource):
     def get_article_file_list(self) -> List[ArticleFileInfo]:
         """
         Downloads and parses the master file list (oa_file_list.csv) from
-        the S3 bucket, robust to column order changes.
+        the S3 bucket, robust to column order changes using csv.DictReader.
         """
         print(f"Downloading master file list from S3 bucket: {self.BUCKET_NAME}")
         try:
             response = self.s3.get_object(Bucket=self.BUCKET_NAME, Key=self.FILE_LIST_KEY)
+            # Use iter_lines and decode for streaming text from S3
             lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
-            reader = csv.reader(lines)
-
-            header = [h.strip() for h in next(reader)]
-            print(f"Parsing CSV with header: {header}")
-
-            col_map = {name: idx for idx, name in enumerate(header)}
-            file_idx = col_map.get("File")
-            pmcid_idx = col_map.get("Accession ID")
-            pmid_idx = col_map.get("PMID")
-            updated_idx = col_map.get("Last Updated")
-            retracted_idx = col_map.get("Retracted")
-
-            if file_idx is None or pmcid_idx is None:
-                raise ValueError("Required columns 'File' or 'Accession ID' not found in CSV header.")
+            reader = csv.DictReader(lines)
 
             file_list = []
             for row in reader:
                 try:
-                    is_retracted = False
-                    if retracted_idx is not None and len(row) > retracted_idx:
-                        is_retracted = row[retracted_idx].lower() in ('true', 'y', 'yes')
+                    # Normalize keys by stripping whitespace
+                    row = {k.strip(): v for k, v in row.items()}
 
+                    if not row.get("File") or not row.get("Accession ID"):
+                        print(f"Skipping malformed row (missing required fields): {row}")
+                        continue
+
+                    is_retracted = row.get("Retracted", "").lower() in ('true', 'y', 'yes')
+                    last_updated_str = row.get("Last Updated")
+                    last_updated = (
+                        datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M:%S")
+                        if last_updated_str else None
+                    )
+
+                    pmid = row.get("PMID")
                     file_info = ArticleFileInfo(
-                        file_path=row[file_idx],
-                        pmcid=row[pmcid_idx],
-                        pmid=row[pmid_idx] if pmid_idx is not None and len(row) > pmid_idx and row[pmid_idx].strip() else None,
-                        last_updated=datetime.strptime(row[updated_idx], "%Y-%m-%d %H:%M:%S") if updated_idx is not None and len(row) > updated_idx and row[updated_idx] else None,
+                        file_path=row["File"],
+                        pmcid=row["Accession ID"],
+                        pmid=pmid if pmid else None,
+                        last_updated=last_updated,
                         is_retracted=is_retracted,
                     )
                     file_list.append(file_info)
-                except (IndexError, ValueError, TypeError) as e:
+                except (ValueError, TypeError) as e:
                     print(f"Skipping malformed row {row}: {e}")
                     continue
 
@@ -278,12 +281,15 @@ class S3DataSource(DataSource):
             lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
             reader = csv.reader(lines)
 
+            # Check for a header and skip it
             header = next(reader)
             if 'PMCID' not in header[0]:
-                 lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
-                 reader = csv.reader(lines)
+                # If no header, process the first line as data
+                return [header[0]] + [row[0] for row in reader if row]
+            else:
+                # If header exists, just process the rest
+                return [row[0] for row in reader if row]
 
-            return [row[0] for row in reader if row]
         except ClientError as e:
             # It's possible the retractions file doesn't exist, which is not a fatal error.
             if e.response['Error']['Code'] == 'NoSuchKey':
@@ -327,9 +333,6 @@ class S3DataSource(DataSource):
             # or checksum validation failure.
             print(f"Failed to download {s3_key}: {e}")
             raise IOError(f"Failed to download {s3_key} from S3.") from e
-
-
-import re
 
 
 def stream_and_parse_tar_gz_archive(

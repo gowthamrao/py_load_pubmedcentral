@@ -62,10 +62,34 @@ def test_get_article_file_list(mock_requests_get):
     assert article_list[0].pmcid == "PMC12345"
     assert article_list[0].pmid == "98765"
     assert article_list[0].last_updated == datetime(2023, 1, 15, 10, 0, 0)
+    assert article_list[0].is_retracted is True
 
     # Check the second record (with a missing PMID)
     assert article_list[1].pmcid == "PMC67890"
     assert article_list[1].pmid is None
+    assert article_list[1].is_retracted is False
+
+
+def test_get_retracted_pmcids_with_header(mock_requests_get):
+    """
+    Tests parsing the retractions CSV file with a header row.
+    """
+    csv_content = "PMCID\nPMC12345\nPMC67890"
+    mock_requests_get.return_value = MockResponse(csv_content.encode("utf-8"))
+    data_source = NcbiFtpDataSource()
+    retracted_list = data_source.get_retracted_pmcids()
+    assert retracted_list == ["PMC12345", "PMC67890"]
+
+
+def test_get_retracted_pmcids_no_header(mock_requests_get):
+    """
+    Tests parsing the retractions CSV file without a header row.
+    """
+    csv_content = "PMC12345\nPMC67890"
+    mock_requests_get.return_value = MockResponse(csv_content.encode("utf-8"))
+    data_source = NcbiFtpDataSource()
+    retracted_list = data_source.get_retracted_pmcids()
+    assert retracted_list == ["PMC12345", "PMC67890"]
 
 
 def test_download_file_success(mock_requests_get, tmp_path):
