@@ -29,13 +29,13 @@ dependencies = [
     "boto3"
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest",
-    "ruff",
-    "mypy",
-    "black",
-]
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+ruff = "*"
+mypy = "*"
+black = "*"
+pytest-postgresql = "*"
+psycopg = {extras = ["binary"], version = "*"}
 
 [project.scripts]
 pmc-sync = "py_load_pubmedcentral.cli:app"
