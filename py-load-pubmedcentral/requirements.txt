@@ -1,0 +1,5 @@
+lxml
+requests
+psycopg2-binary
+typer[all]
+pydantic

@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<articleset>
+  <article>
+    <front>
+      <journal-meta>
+        <journal-id journal-id-type="nlm-ta">J Test Med</journal-id>
+        <journal-title-group>
+          <journal-title>Journal of Test Medicine</journal-title>
+        </journal-title-group>
+        <issn pub-type="ppub">1234-5678</issn>
+        <publisher>
+          <publisher-name>Test Publisher</publisher-name>
+        </publisher>
+      </journal-meta>
+      <article-meta>
+        <article-id pub-id-type="pmc">PMC12345</article-id>
+        <article-id pub-id-type="pmid">54321</article-id>
+        <article-id pub-id-type="doi">10.1000/jtm.2025.01</article-id>
+        <title-group>
+          <article-title>A Comprehensive Test of the JATS Parser</article-title>
+        </title-group>
+        <contrib-group>
+          <contrib contrib-type="author">
+            <name>
+              <surname>Doe</surname>
+              <given-names>John A.</given-names>
+            </name>
+            <aff>Department of Testing, University of Examples</aff>
+            <contrib-id contrib-id-type="orcid">0000-0001-2345-6789</contrib-id>
+          </contrib>
+        </contrib-group>
+        <pub-date pub-type="epub">
+          <day>01</day>
+          <month>09</month>
+          <year>2025</year>
+        </pub-date>
+        <abstract>
+          <p>This is the abstract. It contains important summary information about the test article.</p>
+        </abstract>
+        <permissions>
+            <license license-type="open-access" xlink:href="http://creativecommons.org/licenses/by/4.0/" xmlns:xlink="http://www.w3.org/1999/xlink">
+                <p>This is an open-access article distributed under the terms of the Creative Commons Attribution License (CC BY 4.0).</p>
+            </license>
+        </permissions>
+      </article-meta>
+    </front>
+    <body>
+      <p>This is the full body text of the article. It is more detailed than the abstract.</p>
+      <sec>
+        <title>Methods</title>
+        <p>We tested things thoroughly.</p>
+      </sec>
+    </body>
+  </article>
+  <article>
+    <front>
+      <journal-meta>
+        <journal-title-group>
+          <journal-title>Journal of Incomplete Data</journal-title>
+        </journal-title-group>
+        <publisher>
+          <publisher-name>Missing Info Press</publisher-name>
+        </publisher>
+      </journal-meta>
+      <article-meta>
+        <article-id pub-id-type="pmc">PMC67890</article-id>
+        <title-group>
+          <article-title>An Article with Missing Fields</article-title>
+        </title-group>
+        <contrib-group>
+          <contrib contrib-type="author">
+            <name>
+              <surname>Smith</surname>
+              <given-names>Jane</given-names>
+            </name>
+          </contrib>
+        </contrib-group>
+        <pub-date pub-type="epub">
+          <year>2024</year>
+        </pub-date>
+        <!-- No abstract -->
+        <permissions/>
+      </article-meta>
+    </front>
+    <body>
+      <p>Body text is present.</p>
+    </body>
+  </article>
+</articleset>

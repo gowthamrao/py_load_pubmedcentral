@@ -1,0 +1,47 @@
+[project]
+name = "py-load-pubmedcentral"
+version = "1.0.0"
+description = "A high-throughput, scalable, and reliable pipeline for synchronizing PubMed Central."
+authors = [
+    {name = "Gowtham Rao", email = "rao@ohdsi.org"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Database",
+]
+dependencies = [
+    "lxml",
+    "requests",
+    "psycopg2-binary",
+    "typer[all]",
+    "pydantic"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "black",
+]
+
+[project.scripts]
+pmc-sync = "py_load_pubmedcentral.cli:app"
+
+[tool.poetry]
+packages = [{include = "py_load_pubmedcentral", from = "src"}]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
