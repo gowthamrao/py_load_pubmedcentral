@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -53,46 +54,52 @@ def cleanup_db(adapter):
     adapter.conn.commit()
 
 
-def test_full_pipeline_end_to_end(db_adapter):
+@patch("py_load_pubmedcentral.cli.NcbiFtpDataSource")
+def test_full_pipeline_end_to_end(mock_data_source, db_adapter):
     """
-    Tests the entire pipeline:
+    Tests the entire pipeline with a mocked data source:
     1. Initialize the schema.
-    2. Run a full load from a local .tar.gz file.
+    2. Run the automated full load command.
     3. Verify the data is correctly loaded in the database.
+    4. Verify the sync_history table is updated correctly.
     """
-    # --- 1. Cleanup and Initialization ---
-    cleanup_db(db_adapter)
+    # --- 1. Configure the Mock ---
+    mock_instance = mock_data_source.return_value
+    # Simulate finding one baseline file
+    mock_instance.list_baseline_files.return_value = ["https://fake.host/test_archive.tar.gz"]
+    # Simulate a successful download, returning the path to our local test file
+    mock_instance.download_file.return_value = TEST_ARCHIVE_PATH
 
-    # Run the 'initialize' command
+    # --- 2. Cleanup and Initialization ---
+    cleanup_db(db_adapter)
     init_result = runner.invoke(app, ["initialize", "--schema", str(TEST_SCHEMA_PATH)])
     assert init_result.exit_code == 0
     assert "Database schema initialized successfully" in init_result.stdout
 
-    # --- 2. Run Full Load ---
-    # We use a file:// URL to test the acquisition logic with a local file.
-    archive_url = TEST_ARCHIVE_PATH.as_uri()
-
-    load_result = runner.invoke(app, ["full-load", archive_url])
+    # --- 3. Run Full Load ---
+    load_result = runner.invoke(app, ["full-load"])
     assert load_result.exit_code == 0
-    assert "Phase 1 complete. Total records processed: 2" in load_result.stdout
-    assert "Phase 2 complete. Full load process finished successfully" in load_result.stdout
+    assert "Found 1 baseline archives to process" in load_result.stdout
+    assert "Full baseline load process finished successfully" in load_result.stdout
 
-    # --- 3. Verification ---
+    # --- 4. Verification ---
     with db_adapter.conn.cursor() as cursor:
-        # Check metadata table
+        # Check metadata and content tables
         cursor.execute("SELECT COUNT(*) FROM pmc_articles_metadata;")
-        count = cursor.fetchone()[0]
-        assert count == 2
-
-        # Check content table
+        assert cursor.fetchone()[0] == 2
         cursor.execute("SELECT COUNT(*) FROM pmc_articles_content;")
-        count = cursor.fetchone()[0]
-        assert count == 2
+        assert cursor.fetchone()[0] == 2
 
         # Check for a specific record
         cursor.execute("SELECT title FROM pmc_articles_metadata WHERE pmcid = 'PMC12345';")
-        title = cursor.fetchone()[0]
-        assert title == "A Comprehensive Test of the JATS Parser"
+        assert cursor.fetchone()[0] == "A Comprehensive Test of the JATS Parser"
 
-    # --- 4. Final Cleanup ---
+        # Check sync_history table
+        cursor.execute("SELECT run_type, status, metrics->>'files_processed' FROM sync_history;")
+        history_record = cursor.fetchone()
+        assert history_record[0] == "FULL"
+        assert history_record[1] == "SUCCESS"
+        assert int(history_record[2]) == 1
+
+    # --- 5. Final Cleanup ---
     cleanup_db(db_adapter)
