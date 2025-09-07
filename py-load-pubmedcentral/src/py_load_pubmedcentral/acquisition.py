@@ -13,6 +13,9 @@ from typing import IO, Generator, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import requests
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
 from lxml import etree
 
 from py_load_pubmedcentral.models import (
@@ -191,6 +194,129 @@ class NcbiFtpDataSource(DataSource):
 
         print(f"Checksum verified for {local_filename}.")
         return destination_path
+
+
+class S3DataSource(DataSource):
+    """Data source for the AWS S3 Open Data bucket (s3://pmc-oa-opendata)."""
+
+    BUCKET_NAME = "pmc-oa-opendata"
+    FILE_LIST_KEY = "oa_file_list.csv"
+
+    def __init__(self):
+        # The PMC S3 bucket is public, so we don't need credentials.
+        # We can also add retry logic here if needed, via botocore.config.Config
+        # For now, we use the default unsigned configuration.
+        self.s3 = boto3.client("s3", config=Config(signature_version="unsigned"))
+
+    def get_article_file_list(self) -> List[ArticleFileInfo]:
+        """
+        Downloads and parses the master file list (oa_file_list.csv) from
+        the S3 bucket to get metadata for all article packages.
+
+        Returns:
+            A list of ArticleFileInfo objects for all articles.
+        """
+        print(f"Downloading master file list from S3 bucket: {self.BUCKET_NAME}")
+        try:
+            response = self.s3.get_object(Bucket=self.BUCKET_NAME, Key=self.FILE_LIST_KEY)
+            # get_object returns a StreamingBody, which we can iterate over
+            # to avoid loading the whole file into memory.
+            lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
+            reader = csv.reader(lines)
+
+            # Skip header row
+            header = next(reader)
+            print(f"Parsing CSV with header: {header}")
+
+            file_list = []
+            for row in reader:
+                try:
+                    pmid_val = row[2] if row[2] and row[2].strip() else None
+                    last_updated_val = datetime.strptime(row[3], "%Y-%m-%d %H:%M:%S") if row[3] else None
+
+                    file_info = ArticleFileInfo(
+                        file_path=row[0],
+                        pmcid=row[1],
+                        pmid=pmid_val,
+                        last_updated=last_updated_val,
+                    )
+                    file_list.append(file_info)
+                except (IndexError, ValueError, TypeError) as e:
+                    print(f"Skipping malformed row {row}: {e}")
+                    continue
+
+            print(f"Successfully parsed {len(file_list)} records from the file list.")
+            return file_list
+
+        except ClientError as e:
+            print(f"Failed to download file list from S3: {e}")
+            return []
+
+    def list_baseline_files(self) -> List[str]:
+        """
+        Lists the S3 keys of all baseline .tar.gz archives in the bucket.
+
+        This uses a paginator to efficiently handle the large number of
+        objects in the PMC S3 bucket.
+
+        Returns:
+            A list of S3 object keys for all .tar.gz files found.
+        """
+        print(f"Listing baseline .tar.gz files in S3 bucket: {self.BUCKET_NAME}...")
+        baseline_files = []
+        try:
+            paginator = self.s3.get_paginator("list_objects_v2")
+            pages = paginator.paginate(Bucket=self.BUCKET_NAME)
+
+            for page in pages:
+                if "Contents" in page:
+                    for obj in page["Contents"]:
+                        key = obj["Key"]
+                        if key.lower().endswith(".tar.gz"):
+                            baseline_files.append(key)
+
+            print(f"Found {len(baseline_files)} baseline files.")
+            return baseline_files
+
+        except ClientError as e:
+            print(f"Failed to list files in S3 bucket: {e}")
+            return []
+
+    def download_file(self, url: str, destination_dir: Path) -> Path:
+        """
+        Downloads a file from S3, verifies its integrity using server-side
+        checksums, and saves it locally.
+
+        Args:
+            url: The S3 key of the object to download.
+            destination_dir: The local directory to save the file in.
+
+        Returns:
+            The Path to the verified, downloaded file.
+
+        Raises:
+            IOError: If the download fails due to a client error or if the
+                     destination directory does not exist.
+        """
+        s3_key = url  # Treat the URL parameter as the S3 key for this source
+        local_filename = s3_key.split('/')[-1]
+        destination_path = destination_dir / local_filename
+
+        print(f"Downloading s3://{self.BUCKET_NAME}/{s3_key} to {destination_path}...")
+        try:
+            self.s3.download_file(
+                Bucket=self.BUCKET_NAME,
+                Key=s3_key,
+                Filename=str(destination_path),
+                ExtraArgs={"ChecksumMode": "ENABLED"},
+            )
+            print(f"Successfully downloaded and verified {local_filename}.")
+            return destination_path
+        except ClientError as e:
+            # A ClientError can occur for various reasons, e.g., object not found
+            # or checksum validation failure.
+            print(f"Failed to download {s3_key}: {e}")
+            raise IOError(f"Failed to download {s3_key} from S3.") from e
 
 
 import re

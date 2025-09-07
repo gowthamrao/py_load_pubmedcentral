@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from enum import Enum
 
 import typer
 
 from py_load_pubmedcentral.acquisition import (
+    DataSource,
     NcbiFtpDataSource,
+    S3DataSource,
     stream_and_parse_tar_gz_archive,
 )
 from py_load_pubmedcentral.models import PmcArticlesContent, PmcArticlesMetadata
@@ -59,17 +62,34 @@ def initialize(
             adapter.close()
 
 
+class DataSourceName(str, Enum):
+    ftp = "ftp"
+    s3 = "s3"
+
+
 @app.command()
 def full_load(
     batch_size: int = typer.Option(5000, "--batch-size", "-b", help="Number of records to report progress by."),
+    source: DataSourceName = typer.Option(
+        DataSourceName.s3,
+        "--source",
+        help="The data source to use (ftp or s3).",
+        case_sensitive=False,
+    ),
 ):
     """
     Execute a full (baseline) load by discovering and processing all
-    baseline archives from the NCBI FTP source.
+    baseline archives from the selected data source.
     """
-    typer.echo("--- Starting Full Baseline Load ---")
+    typer.echo(f"--- Starting Full Baseline Load from source: {source.value} ---")
     adapter = get_db_adapter()
-    data_source = NcbiFtpDataSource()
+
+    data_source: DataSource
+    if source == DataSourceName.s3:
+        data_source = S3DataSource()
+    else:
+        data_source = NcbiFtpDataSource()
+
     run_id = None
     status = "FAILED"  # Assume failure unless explicitly marked as success
     files_processed_count = 0
@@ -93,13 +113,18 @@ def full_load(
             typer.echo(f"Using temporary directory: {tmp_path}")
 
             for i, article_info in enumerate(article_file_list):
-                file_url = data_source.BASE_URL + article_info.file_path
-                typer.echo(f"\n--- Processing file {i+1} of {len(article_file_list)}: {file_url} ---")
+                # The file identifier is a full URL for FTP, but an S3 key for S3.
+                if source == DataSourceName.ftp:
+                    file_identifier = urljoin(NcbiFtpDataSource.BASE_URL, article_info.file_path)
+                else:
+                    file_identifier = article_info.file_path
+
+                typer.echo(f"\n--- Processing file {i+1} of {len(article_file_list)}: {file_identifier} ---")
 
                 try:
-                    verified_path = data_source.download_file(file_url, tmp_path)
+                    verified_path = data_source.download_file(file_identifier, tmp_path)
                 except Exception as e:
-                    typer.secho(f"Failed to download/verify {file_url}. Error: {e}", fg=typer.colors.RED)
+                    typer.secho(f"Failed to download/verify {file_identifier}. Error: {e}", fg=typer.colors.RED)
                     continue
 
                 records_in_batch = 0
