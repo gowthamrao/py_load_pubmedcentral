@@ -103,6 +103,13 @@ def full_load(
         run_id = adapter.start_run(run_type="FULL")
         typer.echo(f"Sync history started for run_id: {run_id}")
 
+        # --- Make full_load idempotent by clearing existing data ---
+        typer.echo("Clearing existing article data for a clean baseline load...")
+        truncate_sql = "TRUNCATE TABLE pmc_articles_content, pmc_articles_metadata RESTART IDENTITY;"
+        adapter.execute_sql(truncate_sql)
+        typer.secho("Existing data cleared.", fg=typer.colors.YELLOW)
+        # ---------------------------------------------------------
+
         typer.echo("Getting article file list from NCBI...")
         article_file_list = data_source.get_article_file_list()
         if not article_file_list:
@@ -213,6 +220,7 @@ def delta_load(
     status = "FAILED"
     files_processed_count = 0
     total_records_count = 0
+    total_retracted_count = 0
 
     try:
         # 1. Get the timestamp of the last successful run to define the delta window.
@@ -221,25 +229,48 @@ def delta_load(
             typer.secho("No successful previous run found. Please run a `full-load` first.", fg=typer.colors.RED)
             raise typer.Exit(code=1)
 
-        # Ensure timestamps are timezone-aware (UTC) for correct comparison.
         last_sync_time_utc = last_sync_time.replace(tzinfo=timezone.utc)
         typer.echo(f"Looking for updates since last successful sync at {last_sync_time_utc.isoformat()}")
 
         run_id = adapter.start_run(run_type="DELTA")
         typer.echo(f"Sync history started for run_id: {run_id}")
 
-        # 2. Get the full article list and filter for new/updated articles.
+        # 2. Get all article metadata from the source.
         typer.echo("Getting full article file list from source...")
         all_articles = data_source.get_article_file_list()
+
+        # 3. Handle Retractions
+        typer.echo("Identifying retracted articles...")
+        # Source 1: The `retractions.csv` file.
+        retracted_from_file = set(data_source.get_retracted_pmcids())
+        # Source 2: Articles marked as retracted in the main file list.
+        retracted_from_list = {article.pmcid for article in all_articles if article.is_retracted}
+
+        all_retracted_pmcids = list(retracted_from_file.union(retracted_from_list))
+
+        if all_retracted_pmcids:
+            typer.echo(f"Found {len(all_retracted_pmcids)} unique PMCIDs marked for retraction. Updating database...")
+            updated_rows = adapter.handle_deletions(all_retracted_pmcids)
+            total_retracted_count = updated_rows
+            typer.secho(f"Marked {updated_rows} articles as retracted in the database.", fg=typer.colors.YELLOW)
+        else:
+            typer.echo("No retracted articles found.")
+
+        # 4. Filter for new and updated articles for processing.
+        # An article is part of the delta if it was updated since the last sync
+        # AND it is NOT retracted. Retracted articles are handled separately.
         delta_articles = [
             article for article in all_articles
-            if article.last_updated and article.last_updated.replace(tzinfo=timezone.utc) > last_sync_time_utc
+            if not article.is_retracted and (
+                article.last_updated and
+                article.last_updated.replace(tzinfo=timezone.utc) > last_sync_time_utc
+            )
         ]
 
         if not delta_articles:
-            typer.secho("No new or updated articles found. Nothing to do.", fg=typer.colors.GREEN)
+            typer.secho("No new or updated articles found to process.", fg=typer.colors.GREEN)
             status = "SUCCESS"
-            return  # Graceful exit, finally block will handle logging.
+            return
 
         typer.echo(f"Found {len(delta_articles)} new/updated articles to process.")
 
@@ -302,7 +333,11 @@ def delta_load(
     finally:
         if adapter:
             if run_id:
-                metrics = {"archives_processed": files_processed_count, "total_articles_upserted": total_records_count}
+                metrics = {
+                    "archives_processed": files_processed_count,
+                    "total_articles_upserted": total_records_count,
+                    "total_articles_retracted": total_retracted_count,
+                }
                 typer.echo(f"Updating sync_history for run_id {run_id} with status '{status}'...")
                 adapter.end_run(run_id, status, metrics)
             adapter.close()

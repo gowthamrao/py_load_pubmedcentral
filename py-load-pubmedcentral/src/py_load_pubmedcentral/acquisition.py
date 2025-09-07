@@ -40,6 +40,16 @@ class DataSource(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_retracted_pmcids(self) -> List[str]:
+        """
+        Retrieves the list of retracted PMCIDs from the source.
+
+        Returns:
+            A list of PMCID strings.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def download_file(self, url: str, destination_dir: Path) -> Path:
         """
         Downloads a file, verifies its integrity, and saves it locally.
@@ -59,45 +69,49 @@ class NcbiFtpDataSource(DataSource):
 
     BASE_URL = "https://ftp.ncbi.nlm.nih.gov/pub/pmc/"
     FILE_LIST_URL = urljoin(BASE_URL, "oa_file_list.csv")
+    RETRACTIONS_URL = urljoin(BASE_URL, "retractions.csv")
 
     def get_article_file_list(self) -> List[ArticleFileInfo]:
         """
         Downloads and parses the master file list (oa_file_list.csv) from
         the NCBI FTP server to get metadata for all article packages.
-
-        Returns:
-            A list of ArticleFileInfo objects for all articles.
+        This implementation is robust to changes in column order.
         """
         print(f"Downloading master file list from {self.FILE_LIST_URL}...")
         try:
             response = requests.get(self.FILE_LIST_URL, stream=True)
             response.raise_for_status()
-
-            # Decode the content as text and read it with the csv module
-            # Using iterator to avoid loading the whole file into memory at once
             lines = (line.decode('utf-8') for line in response.iter_lines())
             reader = csv.reader(lines)
 
-            # Skip header row
-            header = next(reader)
+            header = [h.strip() for h in next(reader)]
             print(f"Parsing CSV with header: {header}")
 
-            # Expected header: ['File', 'Accession ID', 'PMID', 'Last Updated']
-            # We map this to our Pydantic model
+            # Find column indices dynamically
+            col_map = {name: idx for idx, name in enumerate(header)}
+            file_idx = col_map.get("File")
+            pmcid_idx = col_map.get("Accession ID")
+            pmid_idx = col_map.get("PMID")
+            updated_idx = col_map.get("Last Updated")
+            retracted_idx = col_map.get("Retracted") # Added this
+
+            if file_idx is None or pmcid_idx is None:
+                raise ValueError("Required columns 'File' or 'Accession ID' not found in CSV header.")
+
             file_list = []
             for row in reader:
                 try:
-                    # Some PMIDs might be missing or empty strings
-                    pmid_val = row[2] if row[2] and row[2].strip() else None
-
-                    # Parse timestamp, e.g., '2023-12-15 13:31:48'
-                    last_updated_val = datetime.strptime(row[3], "%Y-%m-%d %H:%M:%S") if row[3] else None
+                    is_retracted = False
+                    if retracted_idx is not None and len(row) > retracted_idx:
+                         # Check for common truthy values for retraction status
+                        is_retracted = row[retracted_idx].lower() in ('true', 'y', 'yes')
 
                     file_info = ArticleFileInfo(
-                        file_path=row[0],
-                        pmcid=row[1],
-                        pmid=pmid_val,
-                        last_updated=last_updated_val,
+                        file_path=row[file_idx],
+                        pmcid=row[pmcid_idx],
+                        pmid=row[pmid_idx] if pmid_idx is not None and len(row) > pmid_idx and row[pmid_idx].strip() else None,
+                        last_updated=datetime.strptime(row[updated_idx], "%Y-%m-%d %H:%M:%S") if updated_idx is not None and len(row) > updated_idx and row[updated_idx] else None,
+                        is_retracted=is_retracted,
                     )
                     file_list.append(file_info)
                 except (IndexError, ValueError, TypeError) as e:
@@ -109,7 +123,28 @@ class NcbiFtpDataSource(DataSource):
 
         except requests.RequestException as e:
             print(f"Failed to download file list: {e}")
-            # Depending on desired robustness, could implement retries here
+            return []
+
+    def get_retracted_pmcids(self) -> List[str]:
+        """
+        Downloads and parses the retractions.csv file from the NCBI FTP server.
+        """
+        print(f"Downloading retractions list from {self.RETRACTIONS_URL}...")
+        try:
+            response = requests.get(self.RETRACTIONS_URL)
+            response.raise_for_status()
+            reader = csv.reader(response.text.strip().splitlines())
+
+            # Skip header if it exists
+            header = next(reader)
+            if 'PMCID' not in header[0]:
+                # If no header, reset reader
+                response.encoding = 'utf-8' # ensure correct decoding
+                reader = csv.reader(response.text.strip().splitlines())
+
+            return [row[0] for row in reader if row]
+        except requests.RequestException as e:
+            print(f"Failed to download retractions file: {e}")
             return []
 
     def download_file(self, url: str, destination_dir: Path) -> Path:
@@ -178,44 +213,48 @@ class S3DataSource(DataSource):
 
     BUCKET_NAME = "pmc-oa-opendata"
     FILE_LIST_KEY = "oa_file_list.csv"
+    RETRACTIONS_KEY = "retractions.csv"
 
     def __init__(self):
-        # The PMC S3 bucket is public, so we don't need credentials.
-        # We can also add retry logic here if needed, via botocore.config.Config
-        # For now, we use the default unsigned configuration.
         self.s3 = boto3.client("s3", config=Config(signature_version="unsigned"))
 
     def get_article_file_list(self) -> List[ArticleFileInfo]:
         """
         Downloads and parses the master file list (oa_file_list.csv) from
-        the S3 bucket to get metadata for all article packages.
-
-        Returns:
-            A list of ArticleFileInfo objects for all articles.
+        the S3 bucket, robust to column order changes.
         """
         print(f"Downloading master file list from S3 bucket: {self.BUCKET_NAME}")
         try:
             response = self.s3.get_object(Bucket=self.BUCKET_NAME, Key=self.FILE_LIST_KEY)
-            # get_object returns a StreamingBody, which we can iterate over
-            # to avoid loading the whole file into memory.
             lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
             reader = csv.reader(lines)
 
-            # Skip header row
-            header = next(reader)
+            header = [h.strip() for h in next(reader)]
             print(f"Parsing CSV with header: {header}")
+
+            col_map = {name: idx for idx, name in enumerate(header)}
+            file_idx = col_map.get("File")
+            pmcid_idx = col_map.get("Accession ID")
+            pmid_idx = col_map.get("PMID")
+            updated_idx = col_map.get("Last Updated")
+            retracted_idx = col_map.get("Retracted")
+
+            if file_idx is None or pmcid_idx is None:
+                raise ValueError("Required columns 'File' or 'Accession ID' not found in CSV header.")
 
             file_list = []
             for row in reader:
                 try:
-                    pmid_val = row[2] if row[2] and row[2].strip() else None
-                    last_updated_val = datetime.strptime(row[3], "%Y-%m-%d %H:%M:%S") if row[3] else None
+                    is_retracted = False
+                    if retracted_idx is not None and len(row) > retracted_idx:
+                        is_retracted = row[retracted_idx].lower() in ('true', 'y', 'yes')
 
                     file_info = ArticleFileInfo(
-                        file_path=row[0],
-                        pmcid=row[1],
-                        pmid=pmid_val,
-                        last_updated=last_updated_val,
+                        file_path=row[file_idx],
+                        pmcid=row[pmcid_idx],
+                        pmid=row[pmid_idx] if pmid_idx is not None and len(row) > pmid_idx and row[pmid_idx].strip() else None,
+                        last_updated=datetime.strptime(row[updated_idx], "%Y-%m-%d %H:%M:%S") if updated_idx is not None and len(row) > updated_idx and row[updated_idx] else None,
+                        is_retracted=is_retracted,
                     )
                     file_list.append(file_info)
                 except (IndexError, ValueError, TypeError) as e:
@@ -227,6 +266,30 @@ class S3DataSource(DataSource):
 
         except ClientError as e:
             print(f"Failed to download file list from S3: {e}")
+            return []
+
+    def get_retracted_pmcids(self) -> List[str]:
+        """
+        Downloads and parses the retractions.csv file from the S3 bucket.
+        """
+        print(f"Downloading retractions list from S3 bucket: {self.BUCKET_NAME}")
+        try:
+            response = self.s3.get_object(Bucket=self.BUCKET_NAME, Key=self.RETRACTIONS_KEY)
+            lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
+            reader = csv.reader(lines)
+
+            header = next(reader)
+            if 'PMCID' not in header[0]:
+                 lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
+                 reader = csv.reader(lines)
+
+            return [row[0] for row in reader if row]
+        except ClientError as e:
+            # It's possible the retractions file doesn't exist, which is not a fatal error.
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                print("No retractions.csv file found in S3 bucket. Continuing without it.")
+                return []
+            print(f"Failed to download retractions file from S3: {e}")
             return []
 
     def download_file(self, url: str, destination_dir: Path) -> Path:
@@ -302,15 +365,17 @@ def stream_and_parse_tar_gz_archive(
                 try:
                     # We parse the XML, then decide if we want to keep it.
                     # This is more robust than relying on filenames.
-                    for metadata, content in parse_jats_xml(xml_file_obj, is_retracted=False):
+                    # The is_retracted status is now passed from the file list info.
+                    for metadata, content in parse_jats_xml(
+                        xml_file_obj,
+                        is_retracted=False, # Default, will be overridden below
+                    ):
                         # Check if the parsed article is one we're looking for
                         if metadata.pmcid in article_info_lookup:
                             article_info = article_info_lookup[metadata.pmcid]
                             # Populate the metadata from our source of truth
                             metadata.source_last_updated = article_info.last_updated
-                            # FRD implies retractions are handled via a separate file
-                            # For now, we assume articles in the main list aren't retracted
-                            metadata.is_retracted = False
+                            metadata.is_retracted = article_info.is_retracted
                             yield metadata, content
 
                 except etree.XMLSyntaxError as e:

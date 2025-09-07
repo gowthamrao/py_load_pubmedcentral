@@ -67,3 +67,4 @@ class ArticleFileInfo(BaseModel):
     pmcid: str
     pmid: Optional[str] = None
     last_updated: Optional[datetime] = None
+    is_retracted: bool = False

@@ -279,9 +279,38 @@ class PostgreSQLAdapter(DatabaseAdapter):
                 return result[0]
         return None
 
-    def handle_deletions(self, deletion_list: List[str]):
-        """(Placeholder) Handles article retractions."""
-        raise NotImplementedError("Delta load logic is not yet implemented.")
+    def handle_deletions(self, pmcids_to_retract: List[str]) -> int:
+        """
+        Marks a list of articles as retracted in the database.
+
+        This is an idempotent operation that sets `is_retracted = TRUE` for
+        the given list of PMCIDs.
+
+        Args:
+            pmcids_to_retract: A list of PMCID strings to mark as retracted.
+
+        Returns:
+            The number of rows that were updated.
+        """
+        if not self.conn:
+            self.connect()
+
+        if not pmcids_to_retract:
+            return 0
+
+        sql = """
+            UPDATE pmc_articles_metadata
+            SET is_retracted = TRUE,
+                sync_timestamp = %s
+            WHERE pmcid = ANY(%s) AND is_retracted = FALSE;
+        """
+        with self.conn.cursor() as cursor:
+            # We pass the list of PMCIDs as a tuple for the `ANY` operator
+            cursor.execute(sql, (datetime.utcnow(), pmcids_to_retract))
+            updated_rows = cursor.rowcount
+            self.conn.commit()
+
+        return updated_rows
 
     def update_state(self, last_file_processed: str):
         """(Placeholder) Updates the sync_history table."""
