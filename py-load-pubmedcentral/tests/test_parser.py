@@ -21,7 +21,11 @@ def test_parse_jats_xml_comprehensive_article():
     test_date = datetime(2023, 1, 1, 12, 0, 0)
     with open(TEST_XML_PATH, "rb") as f:
         content = f.read()
-    results = list(parse_jats_xml(io.BytesIO(content), source_last_updated=test_date, is_retracted=True))
+    results = list(parse_jats_xml(io.BytesIO(content), is_retracted=True))
+
+    # Manually set the timestamp for assertion, as the caller is now responsible for this
+    for metadata, _ in results:
+        metadata.source_last_updated = test_date
 
     # Check that two articles were parsed
     assert len(results) == 2
@@ -71,7 +75,11 @@ def test_parse_jats_xml_incomplete_article():
     test_date = datetime(2023, 2, 1, 12, 0, 0)
     with open(TEST_XML_PATH, "rb") as f:
         content = f.read()
-    results = list(parse_jats_xml(io.BytesIO(content), source_last_updated=test_date, is_retracted=False))
+    results = list(parse_jats_xml(io.BytesIO(content), is_retracted=False))
+
+    # Manually set the timestamp for assertion, as the caller is now responsible for this
+    for metadata, _ in results:
+        metadata.source_last_updated = test_date
 
     # Check that two articles were parsed
     assert len(results) == 2
@@ -118,7 +126,7 @@ def test_parser_is_a_generator():
     test_date = datetime(2023, 3, 1, 12, 0, 0)
     with open(TEST_XML_PATH, "rb") as f:
         content = f.read()
-    parser = parse_jats_xml(io.BytesIO(content), source_last_updated=test_date, is_retracted=False)
+    parser = parse_jats_xml(io.BytesIO(content), is_retracted=False)
 
     # Check that it's a generator
     assert hasattr(parser, '__next__')

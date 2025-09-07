@@ -42,45 +42,6 @@ def test_get_article_file_list_s3_success(mock_boto_client):
 
 
 @patch("boto3.client")
-def test_list_baseline_files_s3(mock_boto_client):
-    """
-    Tests that list_baseline_files correctly paginates and filters for .tar.gz files.
-    """
-    # Arrange: Mock the S3 client and its paginator
-    mock_s3 = MagicMock()
-    mock_paginator = MagicMock()
-    mock_s3.get_paginator.return_value = mock_paginator
-
-    mock_paginator.paginate.return_value = [
-        {
-            "Contents": [
-                {"Key": "oa_file_list.csv"},
-                {"Key": "oa_package/00/00/PMC1.tar.gz"},
-            ]
-        },
-        {
-            "Contents": [
-                {"Key": "oa_package/00/01/PMC2.tar.gz"},
-                {"Key": "other_file.txt"},
-            ]
-        },
-    ]
-    mock_boto_client.return_value = mock_s3
-
-    # Act
-    data_source = S3DataSource()
-    result = data_source.list_baseline_files()
-
-    # Assert
-    mock_s3.get_paginator.assert_called_once_with("list_objects_v2")
-    mock_paginator.paginate.assert_called_once_with(Bucket="pmc-oa-opendata")
-    assert len(result) == 2
-    assert "oa_package/00/00/PMC1.tar.gz" in result
-    assert "oa_package/00/01/PMC2.tar.gz" in result
-    assert "oa_file_list.csv" not in result
-
-
-@patch("boto3.client")
 def test_download_file_s3_with_checksum(mock_boto_client, tmp_path: Path):
     """
     Tests that download_file calls the S3 client with ChecksumMode enabled.

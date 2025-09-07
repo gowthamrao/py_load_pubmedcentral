@@ -12,7 +12,7 @@ from typing import IO, Iterable, List, Optional
 import psycopg2
 from pydantic import BaseModel
 
-from py_load_pubmedcentral.models import PmcArticlesMetadata
+from py_load_pubmedcentral.models import PmcArticlesContent, PmcArticlesMetadata
 
 
 class DatabaseAdapter(ABC):
@@ -37,9 +37,17 @@ class DatabaseAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def execute_upsert(self, staging_table: str, main_table: str):
+    def get_last_successful_run_timestamp(self) -> Optional[datetime]:
         """
-        Execute an UPSERT/MERGE operation from a staging table to a main table.
+        Retrieves the timestamp of the last successful synchronization.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def bulk_upsert_articles(self, metadata_file_path: str, content_file_path: str):
+        """
+        Atomically upserts article data from intermediate files into the
+        metadata and content tables.
         """
         raise NotImplementedError
 
@@ -185,11 +193,91 @@ class PostgreSQLAdapter(DatabaseAdapter):
             cursor.execute(sql, (datetime.utcnow(), status, metrics_json, run_id))
             self.conn.commit()
 
-    def execute_upsert(self, staging_table: str, main_table: str):
+    def bulk_upsert_articles(self, metadata_file_path: str, content_file_path: str):
         """
-        (Placeholder) Executes an INSERT...ON CONFLICT...DO UPDATE operation.
+        Performs a transactional bulk "upsert" (insert or update) for article
+        data. It uses temporary tables and PostgreSQL's INSERT...ON CONFLICT
+        command to efficiently merge new and updated data.
         """
-        raise NotImplementedError("Delta load logic is not yet implemented.")
+        if not self.conn:
+            self.connect()
+
+        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+        content_columns = list(PmcArticlesContent.model_fields.keys())
+
+        with self.conn.cursor() as cursor:
+            # 1. Create temp tables that are automatically dropped on commit
+            cursor.execute("CREATE TEMP TABLE staging_metadata (LIKE pmc_articles_metadata) ON COMMIT DROP;")
+            cursor.execute("CREATE TEMP TABLE staging_content (LIKE pmc_articles_content) ON COMMIT DROP;")
+
+            # 2. Bulk load data from files into the staging tables
+            sql_copy = "COPY {} FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
+            with open(metadata_file_path, "r", encoding="utf-8") as f:
+                cursor.copy_expert(sql_copy.format("staging_metadata"), f)
+            with open(content_file_path, "r", encoding="utf-8") as f:
+                cursor.copy_expert(sql_copy.format("staging_content"), f)
+
+            # 3. Upsert metadata, returning the pmcids of rows that were
+            #    actually inserted or updated.
+            metadata_cols_str = ", ".join(metadata_columns)
+            update_cols_str = ", ".join([f"{col} = EXCLUDED.{col}" for col in metadata_columns if col != 'pmcid'])
+
+            upsert_metadata_sql = f"""
+                WITH upserted AS (
+                    INSERT INTO pmc_articles_metadata ({metadata_cols_str})
+                    SELECT * FROM staging_metadata
+                    ON CONFLICT (pmcid) DO UPDATE SET
+                        {update_cols_str}
+                    WHERE pmc_articles_metadata.source_last_updated IS NULL
+                       OR pmc_articles_metadata.source_last_updated < EXCLUDED.source_last_updated
+                    RETURNING pmcid
+                )
+                SELECT pmcid FROM upserted;
+            """
+            cursor.execute(upsert_metadata_sql)
+            affected_pmcids = [row[0] for row in cursor.fetchall()]
+
+            if not affected_pmcids:
+                self.conn.commit()
+                return
+
+            # 4. Upsert content only for the articles whose metadata was affected.
+            #    This ensures data consistency.
+            content_cols_str = ", ".join(content_columns)
+            update_content_cols_str = ", ".join([f"{col} = EXCLUDED.{col}" for col in content_columns if col != 'pmcid'])
+            pmcids_tuple = tuple(affected_pmcids)
+
+            upsert_content_sql = f"""
+                INSERT INTO pmc_articles_content ({content_cols_str})
+                SELECT {content_cols_str} FROM staging_content
+                WHERE pmcid IN %s
+                ON CONFLICT (pmcid) DO UPDATE SET
+                    {update_content_cols_str};
+            """
+            cursor.execute(upsert_content_sql, (pmcids_tuple,))
+
+        self.conn.commit()
+
+    def get_last_successful_run_timestamp(self) -> Optional[datetime]:
+        """
+        Retrieves the end_time of the last run that had a 'SUCCESS' status,
+        for a given run_type. This is used as the starting point for a delta load.
+        """
+        if not self.conn:
+            self.connect()
+
+        sql = """
+            SELECT end_time FROM sync_history
+            WHERE status = 'SUCCESS'
+            ORDER BY end_time DESC
+            LIMIT 1;
+        """
+        with self.conn.cursor() as cursor:
+            cursor.execute(sql)
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+        return None
 
     def handle_deletions(self, deletion_list: List[str]):
         """(Placeholder) Handles article retractions."""
