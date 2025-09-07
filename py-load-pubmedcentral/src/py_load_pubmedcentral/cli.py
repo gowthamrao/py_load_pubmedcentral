@@ -8,7 +8,10 @@ from pathlib import Path
 
 import typer
 
-from py_load_pubmedcentral.acquisition import stream_and_parse_tar_gz_archive
+from py_load_pubmedcentral.acquisition import (
+    NcbiFtpDataSource,
+    stream_and_parse_tar_gz_archive,
+)
 from py_load_pubmedcentral.models import PmcArticlesContent, PmcArticlesMetadata
 from py_load_pubmedcentral.utils import get_db_adapter
 
@@ -58,74 +61,93 @@ def initialize(
 
 @app.command()
 def full_load(
-    tar_gz_url: str = typer.Argument(..., help="URL of the .tar.gz archive to load."),
     batch_size: int = typer.Option(5000, "--batch-size", "-b", help="Number of records to report progress by."),
 ):
     """
-    Execute a full (baseline) load from a .tar.gz archive URL.
+    Execute a full (baseline) load by discovering and processing all
+    baseline archives from the NCBI FTP source.
     """
-    typer.echo(f"--- Starting Full Load for {tar_gz_url} ---")
+    typer.echo("--- Starting Full Baseline Load ---")
     adapter = get_db_adapter()
+    data_source = NcbiFtpDataSource()
+    run_id = None
+    status = "FAILED"  # Assume failure unless explicitly marked as success
+    files_processed_count = 0
+    total_records_count = 0
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir)
-        metadata_tsv_path = tmp_path / "metadata.tsv"
-        content_tsv_path = tmp_path / "content.tsv"
-        typer.echo(f"Using temporary directory for TSV files: {tmp_path}")
+    try:
+        run_id = adapter.start_run(run_type="FULL")
+        typer.echo(f"Sync history started for run_id: {run_id}")
 
-        # --- Phase 1: Download, Parse, and Write to TSV ---
-        typer.echo("Phase 1: Streaming archive, parsing XML, and generating intermediate TSV files...")
-        total_processed = 0
-        try:
-            # Get the generator for parsed articles from the new acquisition module
-            article_generator = stream_and_parse_tar_gz_archive(tar_gz_url)
+        typer.echo("Discovering baseline files from NCBI...")
+        baseline_files = data_source.list_baseline_files()
+        if not baseline_files:
+            typer.secho("No baseline files found. Exiting.", fg=typer.colors.YELLOW)
+            status = "SUCCESS" # Not a failure, just nothing to do.
+            raise typer.Exit()
 
-            metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
-            content_columns = list(PmcArticlesContent.model_fields.keys())
+        typer.echo(f"Found {len(baseline_files)} baseline archives to process.")
 
-            with open(metadata_tsv_path, "w", encoding="utf-8") as meta_f, \
-                 open(content_tsv_path, "w", encoding="utf-8") as content_f:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            typer.echo(f"Using temporary directory: {tmp_path}")
 
-                for metadata, content in article_generator:
-                    meta_row = adapter._prepare_tsv_row(metadata, metadata_columns)
-                    content_row = adapter._prepare_tsv_row(content, content_columns)
-                    meta_f.write(meta_row)
-                    content_f.write(content_row)
+            for i, file_url in enumerate(baseline_files):
+                typer.echo(f"\n--- Processing file {i+1} of {len(baseline_files)}: {file_url} ---")
 
-                    total_processed += 1
-                    if total_processed % batch_size == 0:
-                        typer.echo(f"Processed {total_processed} records...")
+                try:
+                    verified_path = data_source.download_file(file_url, tmp_path)
+                except Exception as e:
+                    typer.secho(f"Failed to download/verify {file_url}. Error: {e}", fg=typer.colors.RED)
+                    continue
 
-            if total_processed == 0:
-                typer.secho("Warning: No articles were found or processed from the archive.", fg=typer.colors.YELLOW)
-            else:
-                typer.secho(f"Phase 1 complete. Total records processed: {total_processed}", fg=typer.colors.GREEN)
+                records_in_batch = 0
+                metadata_tsv_path = tmp_path / "metadata.tsv"
+                content_tsv_path = tmp_path / "content.tsv"
 
-        except Exception as e:
-            typer.secho(f"An unexpected error occurred during Phase 1 (Acquisition/Parsing): {e}", fg=typer.colors.RED)
-            raise typer.Exit(code=1)
+                article_generator = stream_and_parse_tar_gz_archive(verified_path)
+                metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+                content_columns = list(PmcArticlesContent.model_fields.keys())
 
-        # --- Phase 2: Load TSV into Database ---
-        if total_processed > 0:
-            typer.echo("\nPhase 2: Loading TSV files into the database...")
-            try:
-                typer.echo(f"Loading metadata from {metadata_tsv_path} into pmc_articles_metadata...")
-                adapter.bulk_load_native(str(metadata_tsv_path), "pmc_articles_metadata")
-                typer.echo("Metadata load complete.")
+                with open(metadata_tsv_path, "w", encoding="utf-8") as meta_f, \
+                     open(content_tsv_path, "w", encoding="utf-8") as content_f:
+                    for metadata, content in article_generator:
+                        meta_f.write(adapter._prepare_tsv_row(metadata, metadata_columns))
+                        content_f.write(adapter._prepare_tsv_row(content, content_columns))
+                        records_in_batch += 1
+                        if records_in_batch % batch_size == 0:
+                            typer.echo(f"  ...processed {records_in_batch} records...")
 
-                typer.echo(f"Loading content from {content_tsv_path} into pmc_articles_content...")
-                adapter.bulk_load_native(str(content_tsv_path), "pmc_articles_content")
-                typer.echo("Content load complete.")
+                typer.secho(f"Parsed {records_in_batch} records from this batch.", fg=typer.colors.GREEN)
 
-                typer.secho("Phase 2 complete. Full load process finished successfully.", fg=typer.colors.GREEN)
+                if records_in_batch > 0:
+                    typer.echo("Loading TSV files into the database...")
+                    adapter.bulk_load_native(str(metadata_tsv_path), "pmc_articles_metadata")
+                    adapter.bulk_load_native(str(content_tsv_path), "pmc_articles_content")
+                    typer.secho("Database load complete for this batch.", fg=typer.colors.GREEN)
 
-            except Exception as e:
-                typer.secho(f"An unexpected error occurred during Phase 2 (Loading): {e}", fg=typer.colors.RED)
-                raise typer.Exit(code=1)
-            finally:
-                adapter.close()
-        else:
-            typer.echo("Skipping database load as no records were processed.")
+                files_processed_count += 1
+                total_records_count += records_in_batch
+                verified_path.unlink()
+                metadata_tsv_path.unlink()
+                content_tsv_path.unlink()
+
+        typer.secho("\nFull baseline load process finished successfully.", fg=typer.colors.GREEN)
+        status = "SUCCESS"
+
+    except Exception as e:
+        typer.secho(f"A critical error occurred: {e}", fg=typer.colors.RED)
+        # Status is already 'FAILED', so we just let the finally block handle it
+    finally:
+        if adapter:
+            if run_id:
+                metrics = {
+                    "files_processed": files_processed_count,
+                    "total_records": total_records_count,
+                }
+                typer.echo(f"Updating sync_history for run_id {run_id} with status '{status}'...")
+                adapter.end_run(run_id, status, metrics)
+            adapter.close()
 
 
 @app.command()
