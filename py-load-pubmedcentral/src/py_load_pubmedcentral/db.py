@@ -93,37 +93,43 @@ class PostgreSQLAdapter(DatabaseAdapter):
         return "\t".join(row_values) + "\n"
 
 
-    def models_to_tsv(self, models: Iterable[BaseModel], columns: List[str]) -> io.StringIO:
+    def write_models_to_tsv_file(
+        self, models: Iterable[BaseModel], columns: List[str], tsv_file: IO[str]
+    ):
         """
-        Transforms an iterable of Pydantic models into a file-like object
-        containing TSV data, optimized for PostgreSQL's COPY command.
+        Transforms an iterable of Pydantic models and writes them to an
+        open file handle as TSV rows.
+
+        Args:
+            models: An iterable of Pydantic models.
+            columns: The list of column names, in order.
+            tsv_file: An open file handle to write the TSV rows to.
         """
-        tsv_file = io.StringIO()
         for model in models:
             tsv_row = self._prepare_tsv_row(model, columns)
             tsv_file.write(tsv_row)
-        tsv_file.seek(0)  # Rewind to the beginning of the file
-        return tsv_file
 
-    def bulk_load_native(self, file_like_object: IO[str], target_table: str):
+    def bulk_load_native(self, file_path: str, target_table: str):
         """
-        Loads data into a PostgreSQL table from a TSV file-like object
+        Loads data into a PostgreSQL table from a TSV file path
         using the COPY command.
+
+        Args:
+            file_path: The path to the TSV file to load.
+            target_table: The name of the target table in the database.
         """
         if not self.conn:
             self.connect()
 
-        # Assuming the file_like_object provides the column order implicitly
-        # A more robust implementation would pass the columns explicitly.
         sql = f"COPY {target_table} FROM STDIN WITH (FORMAT text, DELIMITER E'\\t')"
 
-        with self.conn.cursor() as cursor:
+        with self.conn.cursor() as cursor, open(file_path, "r", encoding="utf-8") as f:
             # The psycopg2.copy_expert method is powerful but requires care.
             # It's a placeholder here since we cannot execute it.
             print(f"Executing: {sql}")
-            print("Streaming data from file-like object to PostgreSQL...")
+            print(f"Streaming data from '{file_path}' to PostgreSQL table '{target_table}'...")
             # In a real scenario, this would be:
-            # cursor.copy_expert(sql, file_like_object)
+            # cursor.copy_expert(sql, f)
             # self.conn.commit()
             pass
 
