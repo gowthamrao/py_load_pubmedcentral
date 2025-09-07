@@ -73,6 +73,8 @@ def _extract_contributors(article_element: etree._Element) -> list[Contributor]:
 
 def parse_jats_xml(
     xml_file: IO[bytes],
+    source_last_updated: Optional[datetime],
+    is_retracted: bool,
 ) -> Generator[Tuple[PmcArticlesMetadata, PmcArticlesContent], None, None]:
     """
     Parses a JATS XML file (or file-like object) and yields data models.
@@ -82,6 +84,9 @@ def parse_jats_xml(
 
     Args:
         xml_file: A file-like object opened in binary mode.
+        source_last_updated: The timestamp from the source metadata.
+        is_retracted: The retraction status from the source metadata.
+
 
     Yields:
         A tuple containing (PmcArticlesMetadata, PmcArticlesContent) for each
@@ -145,8 +150,8 @@ def parse_jats_xml(
                 journal_info=journal_info,
                 contributors=_extract_contributors(elem),
                 license_info=license_info,
-                is_retracted=False,  # This flag comes from metadata files, not the XML itself
-                source_last_updated=None, # Also from metadata files
+                is_retracted=is_retracted,
+                source_last_updated=source_last_updated,
                 sync_timestamp=datetime.utcnow(),
             )
 

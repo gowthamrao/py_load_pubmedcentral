@@ -79,21 +79,22 @@ def full_load(
         run_id = adapter.start_run(run_type="FULL")
         typer.echo(f"Sync history started for run_id: {run_id}")
 
-        typer.echo("Discovering baseline files from NCBI...")
-        baseline_files = data_source.list_baseline_files()
-        if not baseline_files:
-            typer.secho("No baseline files found. Exiting.", fg=typer.colors.YELLOW)
-            status = "SUCCESS" # Not a failure, just nothing to do.
+        typer.echo("Getting article file list from NCBI...")
+        article_file_list = data_source.get_article_file_list()
+        if not article_file_list:
+            typer.secho("No article files found. Exiting.", fg=typer.colors.YELLOW)
+            status = "SUCCESS"  # Not a failure, just nothing to do.
             raise typer.Exit()
 
-        typer.echo(f"Found {len(baseline_files)} baseline archives to process.")
+        typer.echo(f"Found {len(article_file_list)} article archives to process.")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             typer.echo(f"Using temporary directory: {tmp_path}")
 
-            for i, file_url in enumerate(baseline_files):
-                typer.echo(f"\n--- Processing file {i+1} of {len(baseline_files)}: {file_url} ---")
+            for i, article_info in enumerate(article_file_list):
+                file_url = data_source.BASE_URL + article_info.file_path
+                typer.echo(f"\n--- Processing file {i+1} of {len(article_file_list)}: {file_url} ---")
 
                 try:
                     verified_path = data_source.download_file(file_url, tmp_path)
@@ -105,7 +106,11 @@ def full_load(
                 metadata_tsv_path = tmp_path / "metadata.tsv"
                 content_tsv_path = tmp_path / "content.tsv"
 
-                article_generator = stream_and_parse_tar_gz_archive(verified_path)
+                article_generator = stream_and_parse_tar_gz_archive(
+                    verified_path,
+                    source_last_updated=article_info.last_updated,
+                    is_retracted=False, # Assuming not retracted, will be handled in delta
+                )
                 metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
                 content_columns = list(PmcArticlesContent.model_fields.keys())
 
