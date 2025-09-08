@@ -4,7 +4,7 @@ JATS XML parser using lxml.iterparse for high performance and low memory usage.
 from __future__ import annotations
 
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import IO, Generator, Optional, Tuple
 
 from lxml import etree
@@ -152,7 +152,7 @@ def parse_jats_xml(
                 license_info=license_info,
                 is_retracted=False,  # Default, caller must populate this
                 source_last_updated=None,  # Caller must populate this
-                sync_timestamp=datetime.utcnow(),
+                sync_timestamp=datetime.now(timezone.utc),
             )
 
             content_model = PmcArticlesContent(

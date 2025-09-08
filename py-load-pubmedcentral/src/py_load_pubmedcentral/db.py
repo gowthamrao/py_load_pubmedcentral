@@ -6,7 +6,7 @@ from __future__ import annotations
 import io
 import json
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import IO, Iterable, List, Optional
 
 import psycopg2
@@ -197,7 +197,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
             RETURNING run_id;
         """
         with self.conn.cursor() as cursor:
-            cursor.execute(sql, (run_type, datetime.utcnow(), "RUNNING"))
+            cursor.execute(sql, (run_type, datetime.now(timezone.utc), "RUNNING"))
             run_id = cursor.fetchone()[0]
             self.conn.commit()
         return run_id
@@ -229,7 +229,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
         metrics_json = json.dumps(metrics) if metrics else None
         with self.conn.cursor() as cursor:
             cursor.execute(
-                sql, (datetime.utcnow(), status, metrics_json, last_file_processed, run_id)
+                sql, (datetime.now(timezone.utc), status, metrics_json, last_file_processed, run_id)
             )
             self.conn.commit()
 
@@ -356,7 +356,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
         """
         with self.conn.cursor() as cursor:
             # We pass the list of PMCIDs as a tuple for the `ANY` operator
-            cursor.execute(sql, (datetime.utcnow(), pmcids_to_retract))
+            cursor.execute(sql, (datetime.now(timezone.utc), pmcids_to_retract))
             updated_rows = cursor.rowcount
             self.conn.commit()
 
