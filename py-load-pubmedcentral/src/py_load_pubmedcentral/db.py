@@ -37,9 +37,10 @@ class DatabaseAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_last_successful_run_timestamp(self) -> Optional[datetime]:
+    def get_last_successful_run_info(self, run_type: str = "DELTA") -> Optional[tuple[datetime, str]]:
         """
-        Retrieves the timestamp of the last successful synchronization.
+        Retrieves the end_time and last_file_processed from the last successful run
+        of a specific type.
         """
         raise NotImplementedError
 
@@ -54,11 +55,6 @@ class DatabaseAdapter(ABC):
     @abstractmethod
     def handle_deletions(self, deletion_list: List[str]):
         """Handle records that need to be deleted or marked as retracted."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def update_state(self, last_file_processed: str):
-        """Update the synchronization state in the database."""
         raise NotImplementedError
 
     @abstractmethod
@@ -171,7 +167,13 @@ class PostgreSQLAdapter(DatabaseAdapter):
             self.conn.commit()
         return run_id
 
-    def end_run(self, run_id: int, status: str, metrics: Optional[dict] = None):
+    def end_run(
+        self,
+        run_id: int,
+        status: str,
+        metrics: Optional[dict] = None,
+        last_file_processed: Optional[str] = None,
+    ):
         """
         Updates a sync_history record to mark the end of a run.
 
@@ -179,18 +181,21 @@ class PostgreSQLAdapter(DatabaseAdapter):
             run_id: The ID of the run to update.
             status: The final status, e.g., 'SUCCESS' or 'FAILED'.
             metrics: A dictionary of metrics to store as JSON.
+            last_file_processed: The name/path of the last file processed in the run.
         """
         if not self.conn:
             self.connect()
 
         sql = """
             UPDATE sync_history
-            SET end_time = %s, status = %s, metrics = %s
+            SET end_time = %s, status = %s, metrics = %s, last_file_processed = %s
             WHERE run_id = %s;
         """
         metrics_json = json.dumps(metrics) if metrics else None
         with self.conn.cursor() as cursor:
-            cursor.execute(sql, (datetime.utcnow(), status, metrics_json, run_id))
+            cursor.execute(
+                sql, (datetime.utcnow(), status, metrics_json, last_file_processed, run_id)
+            )
             self.conn.commit()
 
     def bulk_upsert_articles(self, metadata_file_path: str, content_file_path: str):
@@ -258,25 +263,35 @@ class PostgreSQLAdapter(DatabaseAdapter):
 
         self.conn.commit()
 
-    def get_last_successful_run_timestamp(self) -> Optional[datetime]:
+    def get_last_successful_run_info(self, run_type: str = "DELTA") -> Optional[tuple[datetime, str]]:
         """
-        Retrieves the end_time of the last run that had a 'SUCCESS' status,
-        for a given run_type. This is used as the starting point for a delta load.
+        Retrieves the end_time and last_file_processed from the last successful run
+        of a specific type.
+
+        This is used as the starting point for a delta load to ensure exactly-once
+        processing and to know which files are safe to skip.
+
+        Args:
+            run_type: The type of run to look for ('DELTA' or 'FULL').
+
+        Returns:
+            A tuple containing (end_time, last_file_processed) or None if no
+            successful run is found.
         """
         if not self.conn:
             self.connect()
 
         sql = """
-            SELECT end_time FROM sync_history
-            WHERE status = 'SUCCESS'
+            SELECT end_time, last_file_processed FROM sync_history
+            WHERE status = 'SUCCESS' AND run_type = %s
             ORDER BY end_time DESC
             LIMIT 1;
         """
         with self.conn.cursor() as cursor:
-            cursor.execute(sql)
+            cursor.execute(sql, (run_type,))
             result = cursor.fetchone()
             if result:
-                return result[0]
+                return result[0], result[1]
         return None
 
     def handle_deletions(self, pmcids_to_retract: List[str]) -> int:
@@ -311,10 +326,6 @@ class PostgreSQLAdapter(DatabaseAdapter):
             self.conn.commit()
 
         return updated_rows
-
-    def update_state(self, last_file_processed: str):
-        """(Placeholder) Updates the sync_history table."""
-        raise NotImplementedError("Delta load logic is not yet implemented.")
 
     def execute_sql(self, sql_statement: str):
         """Executes a multi-statement SQL string."""
