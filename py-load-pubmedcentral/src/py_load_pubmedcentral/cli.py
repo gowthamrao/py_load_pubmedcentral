@@ -20,8 +20,8 @@ from py_load_pubmedcentral.acquisition import (
     DataSource,
     NcbiFtpDataSource,
     S3DataSource,
-    stream_and_parse_tar_gz_archive,
 )
+from py_load_pubmedcentral.parser import stream_and_parse_tar_gz_archive
 from py_load_pubmedcentral.models import PmcArticlesContent, PmcArticlesMetadata, ArticleFileInfo
 from py_load_pubmedcentral.utils import get_db_adapter
 
@@ -95,12 +95,11 @@ def _download_archive_worker(
 
 def _parse_archive_worker(
     verified_path: Path,
-    articles_in_archive: list[ArticleFileInfo],
+    article_info_lookup: dict[str, ArticleFileInfo],
     tmp_path: Path,
 ) -> tuple[Path, Path, int] | None:
     """Helper function to parse a single archive in a process pool."""
     adapter = get_db_adapter()
-    article_info_lookup = {info.pmcid: info for info in articles_in_archive}
     records_in_archive = 0
     # Use UUID to ensure TSV filenames are unique across processes
     run_uuid = uuid.uuid4()
@@ -110,7 +109,7 @@ def _parse_archive_worker(
     try:
         article_generator = stream_and_parse_tar_gz_archive(
             verified_path,
-            article_info_lookup=article_info_lookup,
+            article_info_lookup,
         )
         metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
         content_columns = list(PmcArticlesContent.model_fields.keys())
@@ -207,10 +206,12 @@ def full_load(
 
             # --- Phase 2: Parallel Parsing ---
             with concurrent.futures.ProcessPoolExecutor(max_workers=parsing_workers) as executor:
-                future_to_path = {
-                    executor.submit(_parse_archive_worker, downloaded_path, articles_by_archive[archive_path], tmp_path): downloaded_path
-                    for archive_path, downloaded_path in downloaded_archives.items()
-                }
+                future_to_path = {}
+                for archive_path, downloaded_path in downloaded_archives.items():
+                    # Create the lookup dict for this specific archive
+                    article_info_lookup = {info.pmcid: info for info in articles_by_archive[archive_path]}
+                    future = executor.submit(_parse_archive_worker, downloaded_path, article_info_lookup, tmp_path)
+                    future_to_path[future] = downloaded_path
                 typer.echo(f"Parsing {len(future_to_path)} archives with {parsing_workers} workers...")
                 for future in concurrent.futures.as_completed(future_to_path):
                     result = future.result()
@@ -263,7 +264,8 @@ def delta_load(
     ),
 ):
     """
-    Execute an incremental (delta) load from the last known successful run.
+    Execute an incremental (delta) load using daily update packages
+    from the last known successful run.
     """
     typer.echo("--- Starting Delta Load ---")
     adapter = get_db_adapter()
@@ -271,9 +273,10 @@ def delta_load(
 
     run_id = None
     status = "FAILED"
-    files_processed_count = 0
+    archives_processed_count = 0
     total_records_count = 0
     total_retracted_count = 0
+    last_processed_file_date = None
 
     try:
         # 1. Get the timestamp of the last successful run to define the delta window.
@@ -288,70 +291,68 @@ def delta_load(
         run_id = adapter.start_run(run_type="DELTA")
         typer.echo(f"Sync history started for run_id: {run_id}")
 
-        # 2. Get all article metadata from the source.
-        typer.echo("Getting full article file list from source...")
-        all_articles = data_source.get_article_file_list()
+        # 2. Handle Retractions from the main retractions.csv file.
+        # This is a full list, so it's idempotent and safe to run every time.
+        typer.echo("Processing full retraction list...")
+        retracted_pmcids = data_source.get_retracted_pmcids()
+        if retracted_pmcids:
+            updated_rows = adapter.handle_deletions(retracted_pmcids)
+            total_retracted_count += updated_rows
+            typer.secho(f"Marked {updated_rows} articles as retracted based on master list.", fg=typer.colors.YELLOW)
 
-        # 3. Handle Retractions
-        typer.echo("Identifying retracted articles...")
-        # Source 1: The `retractions.csv` file.
-        retracted_from_file = set(data_source.get_retracted_pmcids())
-        # Source 2: Articles marked as retracted in the main file list.
-        retracted_from_list = {article.pmcid for article in all_articles if article.is_retracted}
-
-        all_retracted_pmcids = list(retracted_from_file.union(retracted_from_list))
-
-        if all_retracted_pmcids:
-            typer.echo(f"Found {len(all_retracted_pmcids)} unique PMCIDs marked for retraction. Updating database...")
-            updated_rows = adapter.handle_deletions(all_retracted_pmcids)
-            total_retracted_count = updated_rows
-            typer.secho(f"Marked {updated_rows} articles as retracted in the database.", fg=typer.colors.YELLOW)
-        else:
-            typer.echo("No retracted articles found.")
-
-        # 4. Filter for new and updated articles for processing.
-        # An article is part of the delta if it was updated since the last sync
-        # AND it is NOT retracted. Retracted articles are handled separately.
-        delta_articles = [
-            article for article in all_articles
-            if not article.is_retracted and (
-                article.last_updated and
-                article.last_updated.replace(tzinfo=timezone.utc) > last_sync_time_utc
-            )
-        ]
-
-        if not delta_articles:
-            typer.secho("No new or updated articles found to process.", fg=typer.colors.GREEN)
+        # 3. Find new daily incremental update packages since the last run.
+        incremental_updates = data_source.get_incremental_updates(since=last_sync_time_utc)
+        if not incremental_updates:
+            typer.secho("No new incremental updates found.", fg=typer.colors.GREEN)
             status = "SUCCESS"
-            return
+            return  # Use return to proceed to the finally block
 
-        typer.echo(f"Found {len(delta_articles)} new/updated articles to process.")
-
-        # 3. Group articles by archive path to download each archive only once.
-        articles_by_archive = collections.defaultdict(list)
-        for article in delta_articles:
-            articles_by_archive[article.file_path].append(article)
-        typer.echo(f"Discovered {len(articles_by_archive)} unique archives to process.")
+        typer.echo(f"Found {len(incremental_updates)} incremental archives to process.")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            for i, (archive_path, articles_in_archive) in enumerate(articles_by_archive.items()):
-                if source == DataSourceName.ftp:
-                    file_identifier = urljoin(NcbiFtpDataSource.BASE_URL, archive_path)
-                else:
-                    file_identifier = archive_path
+            for i, update_info in enumerate(incremental_updates):
+                typer.echo(f"\n--- Processing archive {i+1} of {len(incremental_updates)}: {update_info.archive_path} ---")
+                articles_in_archive = []
+                retracted_in_archive = []
 
-                typer.echo(f"\n--- Processing archive {i+1} of {len(articles_by_archive)}: {file_identifier} ---")
+                # 4. Get the file list for this specific daily package.
                 try:
-                    verified_path = data_source.download_file(file_identifier, tmp_path)
+                    daily_file_list_stream = data_source.stream_article_infos_from_file_list(update_info.file_list_path)
+                    for article_info in daily_file_list_stream:
+                        articles_in_archive.append(article_info)
+                        if article_info.is_retracted:
+                            retracted_in_archive.append(article_info.pmcid)
                 except Exception as e:
-                    typer.secho(f"Failed to download/verify {file_identifier}. Error: {e}", fg=typer.colors.RED)
+                    typer.secho(f"Could not get or parse file list {update_info.file_list_path}. Skipping archive. Error: {e}", fg=typer.colors.RED)
                     continue
 
-                article_info_lookup = {info.pmcid: info for info in articles_in_archive}
+                # Handle any retractions specified in this daily file list.
+                if retracted_in_archive:
+                    retracted_count = adapter.handle_deletions(retracted_in_archive)
+                    total_retracted_count += retracted_count
+                    typer.secho(f"Marked {retracted_count} articles as retracted from daily list.", fg=typer.colors.YELLOW)
+
+                # Filter out retracted articles from processing for this archive
+                articles_to_process = [info for info in articles_in_archive if not info.is_retracted]
+                if not articles_to_process:
+                    typer.echo("No new/updated articles in this archive after handling retractions.")
+                    archives_processed_count += 1
+                    last_processed_file_date = update_info.date
+                    continue
+
+                # 5. Download and parse the archive.
+                try:
+                    verified_path = data_source.download_file(update_info.archive_path, tmp_path)
+                except Exception as e:
+                    typer.secho(f"Failed to download/verify {update_info.archive_path}. Skipping. Error: {e}", fg=typer.colors.RED)
+                    continue
+
+                article_info_lookup = {info.pmcid: info for info in articles_to_process}
                 records_in_archive = 0
-                metadata_tsv_path = tmp_path / "metadata.tsv"
-                content_tsv_path = tmp_path / "content.tsv"
+                run_uuid = uuid.uuid4()
+                metadata_tsv_path = tmp_path / f"metadata_{run_uuid}.tsv"
+                content_tsv_path = tmp_path / f"content_{run_uuid}.tsv"
 
                 article_generator = stream_and_parse_tar_gz_archive(verified_path, article_info_lookup)
                 metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
@@ -364,32 +365,35 @@ def delta_load(
                         content_f.write(adapter._prepare_tsv_row(content, content_columns))
                         records_in_archive += 1
                         if records_in_archive % batch_size == 0:
-                            typer.echo(f"  ...processed {records_in_archive} records from this archive...")
+                            typer.echo(f"  ...processed {records_in_archive} records...")
 
                 typer.secho(f"Parsed {records_in_archive} targeted records from this archive.", fg=typer.colors.GREEN)
 
+                # 6. Upsert the data into the database.
                 if records_in_archive > 0:
                     typer.echo("Upserting TSV files into the database...")
                     adapter.bulk_upsert_articles(str(metadata_tsv_path), str(content_tsv_path))
                     typer.secho("Database upsert complete for this archive.", fg=typer.colors.GREEN)
+                    metadata_tsv_path.unlink()
+                    content_tsv_path.unlink()
 
-                files_processed_count += 1
+                archives_processed_count += 1
                 total_records_count += records_in_archive
+                last_processed_file_date = update_info.date
                 verified_path.unlink()
-                metadata_tsv_path.unlink()
-                content_tsv_path.unlink()
 
         status = "SUCCESS"
 
     except Exception as e:
-        typer.secho(f"A critical error occurred during delta-load: {e}", fg=typer.colors.RED)
+        typer.secho(f"A critical error occurred during delta-load: {e}", fg=typer.colors.RED, err=True)
     finally:
         if adapter:
             if run_id:
                 metrics = {
-                    "archives_processed": files_processed_count,
+                    "archives_processed": archives_processed_count,
                     "total_articles_upserted": total_records_count,
                     "total_articles_retracted": total_retracted_count,
+                    "last_processed_file_date": last_processed_file_date.isoformat() if last_processed_file_date else None,
                 }
                 typer.echo(f"Updating sync_history for run_id {run_id} with status '{status}'...")
                 adapter.end_run(run_id, status, metrics)

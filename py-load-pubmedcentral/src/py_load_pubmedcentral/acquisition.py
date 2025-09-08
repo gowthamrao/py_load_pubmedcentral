@@ -8,7 +8,7 @@ import hashlib
 import csv
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Generator, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -18,6 +18,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from lxml import etree
+from pydantic import BaseModel
 
 from py_load_pubmedcentral.models import (
     ArticleFileInfo,
@@ -27,16 +28,37 @@ from py_load_pubmedcentral.models import (
 from py_load_pubmedcentral.parser import parse_jats_xml
 
 
+class IncrementalUpdateInfo(BaseModel):
+    """Represents a single incremental update package found on the source."""
+
+    archive_path: str  # URL or S3 key for the .tar.gz file
+    file_list_path: str  # URL or S3 key for the .filelist.csv file
+    date: datetime
+
+
 class DataSource(ABC):
     """Abstract Base Class for a data source (e.g., FTP, S3)."""
 
     @abstractmethod
     def get_article_file_list(self) -> List[ArticleFileInfo]:
         """
-        Retrieves the complete list of article packages and their metadata.
+        Retrieves the complete list of article packages and their metadata for a full load.
 
         Returns:
             A list of ArticleFileInfo objects.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_incremental_updates(self, since: datetime) -> List[IncrementalUpdateInfo]:
+        """
+        Retrieves a list of incremental update packages since a given date.
+
+        Args:
+            since: The timestamp of the last successful run.
+
+        Returns:
+            A list of IncrementalUpdateInfo objects for packages needing processing.
         """
         raise NotImplementedError
 
@@ -64,6 +86,13 @@ class DataSource(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def stream_article_infos_from_file_list(self, file_list_path: str) -> Generator[ArticleFileInfo, None, None]:
+        """
+        Downloads and streams ArticleFileInfo records from a given file list path (URL or S3 key).
+        """
+        raise NotImplementedError
+
 
 class NcbiFtpDataSource(DataSource):
     """Data source for the NCBI FTP server (via HTTPS)."""
@@ -71,60 +100,72 @@ class NcbiFtpDataSource(DataSource):
     BASE_URL = "https://ftp.ncbi.nlm.nih.gov/pub/pmc/"
     FILE_LIST_URL = urljoin(BASE_URL, "oa_file_list.csv")
     RETRACTIONS_URL = urljoin(BASE_URL, "retractions.csv")
+    BULK_DIR = "oa_bulk/"
+    LICENSE_DIRS = ["oa_comm", "oa_noncomm", "oa_other"]
+    CONTENT_DIRS = ["xml", "txt"]
+
+    # Regex to find hrefs in Apache's default directory listing.
+    HREF_RE = re.compile(r'href="([^"]+)"')
+    # Regex to parse incremental file names.
+    INCR_RE = re.compile(r".+\.incr\.(\d{4}-\d{2}-\d{2})\.tar\.gz$")
 
     def get_article_file_list(self) -> List[ArticleFileInfo]:
         """
         Downloads and parses the master file list (oa_file_list.csv) from
         the NCBI FTP server to get metadata for all article packages.
-        This implementation is robust to changes in column order by using
-        csv.DictReader.
         """
         print(f"Downloading master file list from {self.FILE_LIST_URL}...")
-        try:
-            response = requests.get(self.FILE_LIST_URL, stream=True)
-            response.raise_for_status()
-            # Use iter_lines and decode to handle streaming text
-            lines = (line.decode('utf-8') for line in response.iter_lines())
-            # Use DictReader for robust column handling
-            reader = csv.DictReader(lines)
+        all_infos = list(self.stream_article_infos_from_file_list(self.FILE_LIST_URL))
+        print(f"Successfully parsed {len(all_infos)} records from the master file list.")
+        return all_infos
 
-            file_list = []
-            for row in reader:
+    def get_incremental_updates(self, since: datetime) -> List[IncrementalUpdateInfo]:
+        """
+        Finds and returns incremental update packages on the FTP server newer than `since`.
+        """
+        updates = []
+        since_date = since.date()
+        print(f"Searching for FTP incremental updates since {since_date.isoformat()}...")
+
+        for license_dir in self.LICENSE_DIRS:
+            # We are only interested in XML content for now.
+            for content_dir in ["xml"]:
+                # Construct the full URL for the directory to be listed
+                dir_url = urljoin(self.BASE_URL, f"{self.BULK_DIR}{license_dir}/{content_dir}/")
+                print(f"  Listing directory: {dir_url}")
+
                 try:
-                    # Normalize keys by stripping whitespace
-                    row = {k.strip(): v for k, v in row.items()}
-
-                    # Check for required fields
-                    if not row.get("File") or not row.get("Accession ID"):
-                        print(f"Skipping malformed row (missing required fields): {row}")
-                        continue
-
-                    is_retracted = row.get("Retracted", "").lower() in ('true', 'y', 'yes')
-                    last_updated_str = row.get("Last Updated")
-                    last_updated = (
-                        datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M:%S")
-                        if last_updated_str else None
-                    )
-
-                    pmid = row.get("PMID")
-                    file_info = ArticleFileInfo(
-                        file_path=row["File"],
-                        pmcid=row["Accession ID"],
-                        pmid=pmid if pmid else None,
-                        last_updated=last_updated,
-                        is_retracted=is_retracted,
-                    )
-                    file_list.append(file_info)
-                except (ValueError, TypeError) as e:
-                    print(f"Skipping malformed row {row}: {e}")
+                    response = requests.get(dir_url)
+                    response.raise_for_status()
+                except requests.RequestException as e:
+                    print(f"Could not list directory {dir_url}: {e}")
                     continue
 
-            print(f"Successfully parsed {len(file_list)} records from the file list.")
-            return file_list
+                # Find all potential archive files in the HTML response
+                filenames = self.HREF_RE.findall(response.text)
+                for filename in filenames:
+                    match = self.INCR_RE.match(filename)
+                    if not match:
+                        continue
 
-        except requests.RequestException as e:
-            print(f"Failed to download file list: {e}")
-            return []
+                    file_date_str = match.group(1)
+                    file_date = datetime.strptime(file_date_str, "%Y-%m-%d").date()
+
+                    if file_date > since_date:
+                        archive_path = urljoin(dir_url, filename)
+                        file_list_path = archive_path.replace(".tar.gz", ".filelist.csv")
+                        updates.append(
+                            IncrementalUpdateInfo(
+                                archive_path=archive_path,
+                                file_list_path=file_list_path,
+                                date=datetime.combine(file_date, datetime.min.time(), tzinfo=timezone.utc),
+                            )
+                        )
+
+        # Sort updates by date, oldest first, to ensure sequential processing.
+        updates.sort(key=lambda u: u.date)
+        print(f"Found {len(updates)} new incremental updates on FTP source.")
+        return updates
 
     def get_retracted_pmcids(self) -> List[str]:
         """
@@ -155,19 +196,7 @@ class NcbiFtpDataSource(DataSource):
         """
         Downloads a file from a URL, verifies its MD5 checksum, and saves
         it to a local directory.
-
-        Args:
-            url: The URL of the .tar.gz file to download.
-            destination_dir: The local directory to save the file in.
-
-        Returns:
-            The Path to the verified, downloaded file.
-
-        Raises:
-            IOError: If the downloaded file's checksum does not match the
-                     expected checksum.
         """
-        # 1. Download the main file
         local_filename = url.split('/')[-1]
         destination_path = destination_dir / local_filename
         print(f"Downloading {url} to {destination_path}...")
@@ -177,39 +206,69 @@ class NcbiFtpDataSource(DataSource):
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-        # 2. Download the checksum file
-        md5_url = url + ".md5"
-        print(f"Downloading checksum from {md5_url}...")
-        md5_response = requests.get(md5_url)
-        md5_response.raise_for_status()
+        # Checksum verification for .tar.gz files only
+        if url.endswith(".tar.gz"):
+            md5_url = url + ".md5"
+            print(f"Downloading checksum from {md5_url}...")
+            md5_response = requests.get(md5_url)
+            if md5_response.status_code == 404:
+                print(f"Warning: No MD5 checksum file found at {md5_url}. Skipping verification.")
+                return destination_path
+            md5_response.raise_for_status()
 
-        # Expected format: "MD5(filename.tar.gz)= a1b2c3d4...\n"
-        match = re.search(r"=\s*([a-f0-9]{32})", md5_response.text)
-        if not match:
-            raise IOError(f"Could not parse MD5 checksum from {md5_url}")
-        expected_checksum = match.group(1)
-        print(f"Expected checksum: {expected_checksum}")
+            match = re.search(r"=\s*([a-f0-9]{32})", md5_response.text)
+            if not match:
+                raise IOError(f"Could not parse MD5 checksum from {md5_url}")
+            expected_checksum = match.group(1)
 
-        # 3. Calculate checksum of the downloaded file
-        print(f"Calculating checksum for {destination_path}...")
-        hasher = hashlib.md5()
-        with open(destination_path, 'rb') as f:
-            while chunk := f.read(8192):
-                hasher.update(chunk)
-        actual_checksum = hasher.hexdigest()
-        print(f"Actual checksum:   {actual_checksum}")
+            hasher = hashlib.md5()
+            with open(destination_path, 'rb') as f:
+                while chunk := f.read(8192):
+                    hasher.update(chunk)
+            actual_checksum = hasher.hexdigest()
 
-        # 4. Compare checksums
-        if actual_checksum != expected_checksum:
-            # Clean up the corrupt file before raising
-            destination_path.unlink()
-            raise IOError(
-                f"Checksum mismatch for {local_filename}. "
-                f"Expected {expected_checksum}, got {actual_checksum}."
-            )
+            if actual_checksum != expected_checksum:
+                destination_path.unlink()
+                raise IOError(
+                    f"Checksum mismatch for {local_filename}. "
+                    f"Expected {expected_checksum}, got {actual_checksum}."
+                )
+            print(f"Checksum verified for {local_filename}.")
 
-        print(f"Checksum verified for {local_filename}.")
         return destination_path
+
+    def stream_article_infos_from_file_list(self, file_list_path: str) -> Generator[ArticleFileInfo, None, None]:
+        """
+        Downloads and streams ArticleFileInfo records from a given file list URL.
+        """
+        try:
+            response = requests.get(file_list_path, stream=True)
+            response.raise_for_status()
+            lines = (line.decode('utf-8') for line in response.iter_lines())
+            reader = csv.DictReader(lines)
+
+            for row in reader:
+                try:
+                    row = {k.strip(): v for k, v in row.items()}
+                    if not row.get("File") or not row.get("Accession ID"):
+                        continue
+                    last_updated_str = row.get("Last Updated")
+                    pmid = row.get("PMID")
+                    yield ArticleFileInfo(
+                        file_path=row["File"],
+                        pmcid=row["Accession ID"],
+                        pmid=pmid if pmid else None,
+                        last_updated=(
+                            datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M:%S")
+                            if last_updated_str else None
+                        ),
+                        is_retracted=row.get("Retracted", "").lower() in ('true', 'y', 'yes'),
+                    )
+                except (ValueError, TypeError):
+                    continue
+        except requests.RequestException as e:
+            print(f"Failed to stream or parse file list from {file_list_path}: {e}")
+            return
 
 
 class S3DataSource(DataSource):
@@ -218,58 +277,69 @@ class S3DataSource(DataSource):
     BUCKET_NAME = "pmc-oa-opendata"
     FILE_LIST_KEY = "oa_file_list.csv"
     RETRACTIONS_KEY = "retractions.csv"
+    BULK_DIR = "oa_bulk/"
+    LICENSE_DIRS = ["oa_comm", "oa_noncomm", "oa_other"]
+    CONTENT_DIRS = ["xml", "txt"]
+
+    # Regex to parse incremental file names from S3 keys.
+    INCR_RE = re.compile(r".+\.incr\.(\d{4}-\d{2}-\d{2})\.tar\.gz$")
 
     def __init__(self):
         self.s3 = boto3.client("s3", config=Config(signature_version="unsigned"))
 
     def get_article_file_list(self) -> List[ArticleFileInfo]:
         """
-        Downloads and parses the master file list (oa_file_list.csv) from
-        the S3 bucket, robust to column order changes using csv.DictReader.
+        Downloads and parses the master file list (oa_file_list.csv) from the S3 bucket.
         """
         print(f"Downloading master file list from S3 bucket: {self.BUCKET_NAME}")
-        try:
-            response = self.s3.get_object(Bucket=self.BUCKET_NAME, Key=self.FILE_LIST_KEY)
-            # Use iter_lines and decode for streaming text from S3
-            lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
-            reader = csv.DictReader(lines)
+        all_infos = list(self.stream_article_infos_from_file_list(self.FILE_LIST_KEY))
+        print(f"Successfully parsed {len(all_infos)} records from the master file list.")
+        return all_infos
 
-            file_list = []
-            for row in reader:
+    def get_incremental_updates(self, since: datetime) -> List[IncrementalUpdateInfo]:
+        """
+        Finds and returns incremental update packages on S3 newer than `since`.
+        """
+        updates = []
+        since_date = since.date()
+        paginator = self.s3.get_paginator("list_objects_v2")
+        print(f"Searching for S3 incremental updates since {since_date.isoformat()}...")
+
+        for license_dir in self.LICENSE_DIRS:
+            # We are only interested in XML content for now.
+            for content_dir in ["xml"]:
+                prefix = f"{self.BULK_DIR}{license_dir}/{content_dir}/"
+                print(f"  Listing objects with prefix: s3://{self.BUCKET_NAME}/{prefix}")
+
                 try:
-                    # Normalize keys by stripping whitespace
-                    row = {k.strip(): v for k, v in row.items()}
+                    pages = paginator.paginate(Bucket=self.BUCKET_NAME, Prefix=prefix)
+                    for page in pages:
+                        for obj in page.get("Contents", []):
+                            key = obj["Key"]
+                            match = self.INCR_RE.match(key)
+                            if not match:
+                                continue
 
-                    if not row.get("File") or not row.get("Accession ID"):
-                        print(f"Skipping malformed row (missing required fields): {row}")
-                        continue
+                            file_date_str = match.group(1)
+                            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").date()
 
-                    is_retracted = row.get("Retracted", "").lower() in ('true', 'y', 'yes')
-                    last_updated_str = row.get("Last Updated")
-                    last_updated = (
-                        datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M:%S")
-                        if last_updated_str else None
-                    )
-
-                    pmid = row.get("PMID")
-                    file_info = ArticleFileInfo(
-                        file_path=row["File"],
-                        pmcid=row["Accession ID"],
-                        pmid=pmid if pmid else None,
-                        last_updated=last_updated,
-                        is_retracted=is_retracted,
-                    )
-                    file_list.append(file_info)
-                except (ValueError, TypeError) as e:
-                    print(f"Skipping malformed row {row}: {e}")
+                            if file_date > since_date:
+                                archive_path = key
+                                file_list_path = archive_path.replace(".tar.gz", ".filelist.csv")
+                                updates.append(
+                                    IncrementalUpdateInfo(
+                                        archive_path=archive_path,
+                                        file_list_path=file_list_path,
+                                        date=datetime.combine(file_date, datetime.min.time(), tzinfo=timezone.utc),
+                                    )
+                                )
+                except ClientError as e:
+                    print(f"Could not list objects with prefix {prefix}: {e}")
                     continue
 
-            print(f"Successfully parsed {len(file_list)} records from the file list.")
-            return file_list
-
-        except ClientError as e:
-            print(f"Failed to download file list from S3: {e}")
-            return []
+        updates.sort(key=lambda u: u.date)
+        print(f"Found {len(updates)} new incremental updates on S3 source.")
+        return updates
 
     def get_retracted_pmcids(self) -> List[str]:
         """
@@ -281,17 +351,12 @@ class S3DataSource(DataSource):
             lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
             reader = csv.reader(lines)
 
-            # Check for a header and skip it
             header = next(reader)
             if 'PMCID' not in header[0]:
-                # If no header, process the first line as data
                 return [header[0]] + [row[0] for row in reader if row]
             else:
-                # If header exists, just process the rest
                 return [row[0] for row in reader if row]
-
         except ClientError as e:
-            # It's possible the retractions file doesn't exist, which is not a fatal error.
             if e.response['Error']['Code'] == 'NoSuchKey':
                 print("No retractions.csv file found in S3 bucket. Continuing without it.")
                 return []
@@ -300,89 +365,60 @@ class S3DataSource(DataSource):
 
     def download_file(self, url: str, destination_dir: Path) -> Path:
         """
-        Downloads a file from S3, verifies its integrity using server-side
-        checksums, and saves it locally.
-
-        Args:
-            url: The S3 key of the object to download.
-            destination_dir: The local directory to save the file in.
-
-        Returns:
-            The Path to the verified, downloaded file.
-
-        Raises:
-            IOError: If the download fails due to a client error or if the
-                     destination directory does not exist.
+        Downloads a file from S3, verifying its integrity using server-side checksums.
         """
-        s3_key = url  # Treat the URL parameter as the S3 key for this source
+        s3_key = url
         local_filename = s3_key.split('/')[-1]
         destination_path = destination_dir / local_filename
 
         print(f"Downloading s3://{self.BUCKET_NAME}/{s3_key} to {destination_path}...")
         try:
+            # For file lists, we don't need checksums. For archives, we do.
+            extra_args = {"ChecksumMode": "ENABLED"} if s3_key.endswith(".tar.gz") else {}
             self.s3.download_file(
                 Bucket=self.BUCKET_NAME,
                 Key=s3_key,
                 Filename=str(destination_path),
-                ExtraArgs={"ChecksumMode": "ENABLED"},
+                ExtraArgs=extra_args,
             )
-            print(f"Successfully downloaded and verified {local_filename}.")
+            print(f"Successfully downloaded {local_filename}.")
             return destination_path
         except ClientError as e:
-            # A ClientError can occur for various reasons, e.g., object not found
-            # or checksum validation failure.
             print(f"Failed to download {s3_key}: {e}")
             raise IOError(f"Failed to download {s3_key} from S3.") from e
 
-
-def stream_and_parse_tar_gz_archive(
-    tar_gz_path: Path,
-    article_info_lookup: dict[str, ArticleFileInfo],
-) -> Generator[Tuple[PmcArticlesMetadata, PmcArticlesContent], None, None]:
-    """
-    Opens a local .tar.gz archive, finds XML files for target articles,
-    parses them, and yields data models.
-
-    This function streams the archive extraction. It parses each article,
-    checks if its PMCID is in the lookup, and if so, enriches the article
-    with metadata from the lookup (like the correct `source_last_updated`
-    timestamp) before yielding it.
-
-    Args:
-        tar_gz_path: The local path to the .tar.gz archive to process.
-        article_info_lookup: A dictionary mapping PMCID to ArticleFileInfo.
-                             This determines which articles to process and provides
-                             their metadata.
-
-    Yields:
-        A tuple of (PmcArticlesMetadata, PmcArticlesContent) for each targeted
-        and successfully parsed article in the archive.
-    """
-    with tarfile.open(name=tar_gz_path, mode="r|gz") as tar:
-        for member in tar:
-            if member.isfile() and member.name.lower().endswith((".xml", ".nxml")):
-                xml_file_obj = tar.extractfile(member)
-                if not xml_file_obj:
-                    continue
-
+    def stream_article_infos_from_file_list(self, file_list_path: str) -> Generator[ArticleFileInfo, None, None]:
+        """
+        Downloads and streams ArticleFileInfo records from a given file list S3 key.
+        """
+        try:
+            response = self.s3.get_object(Bucket=self.BUCKET_NAME, Key=file_list_path)
+            lines = (line.decode('utf-8') for line in response["Body"].iter_lines())
+            reader = csv.DictReader(lines)
+            for row in reader:
                 try:
-                    # We parse the XML, then decide if we want to keep it.
-                    # This is more robust than relying on filenames.
-                    # The is_retracted status is now passed from the file list info.
-                    for metadata, content in parse_jats_xml(
-                        xml_file_obj,
-                        is_retracted=False, # Default, will be overridden below
-                    ):
-                        # Check if the parsed article is one we're looking for
-                        if metadata.pmcid in article_info_lookup:
-                            article_info = article_info_lookup[metadata.pmcid]
-                            # Populate the metadata from our source of truth
-                            metadata.source_last_updated = article_info.last_updated
-                            metadata.is_retracted = article_info.is_retracted
-                            yield metadata, content
-
-                except etree.XMLSyntaxError as e:
-                    print(f"Skipping malformed XML file {member.name}: {e}")
+                    row = {k.strip(): v for k, v in row.items()}
+                    if not row.get("File") or not row.get("Accession ID"):
+                        continue
+                    last_updated_str = row.get("Last Updated")
+                    pmid = row.get("PMID")
+                    yield ArticleFileInfo(
+                        file_path=row["File"],
+                        pmcid=row["Accession ID"],
+                        pmid=pmid if pmid else None,
+                        last_updated=(
+                            datetime.strptime(last_updated_str, "%Y-%m-%d %H:%M:%S")
+                            if last_updated_str else None
+                        ),
+                        is_retracted=row.get("Retracted", "").lower() in ('true', 'y', 'yes'),
+                    )
+                except (ValueError, TypeError):
                     continue
-                finally:
-                    xml_file_obj.close()
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                print(f"File list not found at s3://{self.BUCKET_NAME}/{file_list_path}")
+            else:
+                print(f"Failed to stream or parse file list from S3 key {file_list_path}: {e}")
+            return
+
+
