@@ -211,33 +211,65 @@ def full_load(
             typer.secho(f"Successfully downloaded {len(downloaded_archives)} archives.", fg=typer.colors.GREEN)
 
             # --- Phase 2: Parallel Parsing ---
-            with concurrent.futures.ProcessPoolExecutor(max_workers=parsing_workers) as executor:
-                future_to_path = {}
+            if parsing_workers > 1:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=parsing_workers) as executor:
+                    future_to_path = {}
+                    for archive_path, downloaded_path in downloaded_archives.items():
+                        # Create the lookup dict for this specific archive
+                        article_info_lookup = {info.pmcid: info for info in articles_by_archive[archive_path]}
+                        future = executor.submit(_parse_archive_worker, downloaded_path, article_info_lookup, tmp_path)
+                        future_to_path[future] = downloaded_path
+                    typer.echo(f"Parsing {len(future_to_path)} archives with {parsing_workers} workers...")
+                    for future in concurrent.futures.as_completed(future_to_path):
+                        result = future.result()
+                        if result:
+                            meta_path, content_path, records_count = result
+                            generated_tsv_files.append((meta_path, content_path))
+                            total_records_count += records_count
+                            total_archives_processed += 1
+                            typer.echo(f"  ...parsed {records_count} records from archive.")
+            else:
+                # Run sequentially if only one worker is specified
+                typer.echo("Parsing archives sequentially with 1 worker...")
                 for archive_path, downloaded_path in downloaded_archives.items():
-                    # Create the lookup dict for this specific archive
                     article_info_lookup = {info.pmcid: info for info in articles_by_archive[archive_path]}
-                    future = executor.submit(_parse_archive_worker, downloaded_path, article_info_lookup, tmp_path)
-                    future_to_path[future] = downloaded_path
-                typer.echo(f"Parsing {len(future_to_path)} archives with {parsing_workers} workers...")
-                for future in concurrent.futures.as_completed(future_to_path):
-                    result = future.result()
+                    result = _parse_archive_worker(downloaded_path, article_info_lookup, tmp_path)
                     if result:
                         meta_path, content_path, records_count = result
                         generated_tsv_files.append((meta_path, content_path))
                         total_records_count += records_count
                         total_archives_processed += 1
-                        typer.echo(f"  ...parsed {records_count} records from archive.")
+                        typer.echo(f"  ...parsed {records_count} records from archive {archive_path}.")
 
             typer.secho(f"Successfully parsed {total_archives_processed} archives.", fg=typer.colors.GREEN)
 
-            # --- Phase 3: Sequential Loading ---
-            typer.echo(f"Loading data from {len(generated_tsv_files) * 2} TSV files into the database...")
-            for i, (meta_path, content_path) in enumerate(generated_tsv_files):
-                typer.echo(f"  Loading file set {i+1} of {len(generated_tsv_files)}...")
-                adapter.bulk_load_native(str(meta_path), "pmc_articles_metadata")
-                adapter.bulk_load_native(str(content_path), "pmc_articles_content")
-                meta_path.unlink()
-                content_path.unlink()
+            # --- Phase 3: Aggregate and Load ---
+            typer.echo("Aggregating parsed data...")
+            agg_metadata_path = tmp_path / "agg_metadata.tsv"
+            agg_content_path = tmp_path / "agg_content.tsv"
+
+            with open(agg_metadata_path, "w", encoding="utf-8") as agg_meta_f, \
+                 open(agg_content_path, "w", encoding="utf-8") as agg_content_f:
+                for meta_path, content_path in generated_tsv_files:
+                    if meta_path.exists():
+                        with open(meta_path, "r", encoding="utf-8") as meta_f:
+                            agg_meta_f.write(meta_f.read())
+                        meta_path.unlink()
+                    if content_path.exists():
+                        with open(content_path, "r", encoding="utf-8") as content_f:
+                            agg_content_f.write(content_f.read())
+                        content_path.unlink()
+
+            typer.secho("Data aggregation complete.", fg=typer.colors.GREEN)
+
+            typer.echo("Loading all data into the database in a single transaction...")
+            # Using bulk_upsert_articles ensures the load is atomic.
+            # We pass is_full_load=True to use the optimized direct COPY path.
+            adapter.bulk_upsert_articles(
+                str(agg_metadata_path), str(agg_content_path), is_full_load=True
+            )
+            agg_metadata_path.unlink()
+            agg_content_path.unlink()
 
             typer.secho("Database loading complete.", fg=typer.colors.GREEN)
 
@@ -431,18 +463,34 @@ def delta_load(
             typer.secho(f"Successfully downloaded {len(downloaded_archives)} archives.", fg=typer.colors.GREEN)
 
             # --- Phase 2: Parallel Parsing ---
-            with concurrent.futures.ProcessPoolExecutor(max_workers=parsing_workers) as executor:
-                future_to_update_info = {
-                    executor.submit(_parse_delta_archive_worker, local_path, update_info, source, tmp_path): update_info
-                    for local_path, update_info in downloaded_archives.values()
-                }
-                typer.echo(f"Parsing {len(future_to_update_info)} archives with {parsing_workers} workers...")
-                # Process futures in the original submission order to correctly track the last file
-                sorted_futures = [f for f, u in sorted(future_to_update_info.items(), key=lambda item: item[1].date)]
+            if parsing_workers > 1:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=parsing_workers) as executor:
+                    future_to_update_info = {
+                        executor.submit(_parse_delta_archive_worker, local_path, update_info, source, tmp_path): update_info
+                        for local_path, update_info in downloaded_archives.values()
+                    }
+                    typer.echo(f"Parsing {len(future_to_update_info)} archives with {parsing_workers} workers...")
+                    # Process futures in the original submission order to correctly track the last file
+                    sorted_futures = [f for f, u in sorted(future_to_update_info.items(), key=lambda item: item[1].date)]
 
-                for future in sorted_futures:
-                    update_info = future_to_update_info[future]
-                    result = future.result()
+                    for future in sorted_futures:
+                        update_info = future_to_update_info[future]
+                        result = future.result()
+                        if result:
+                            meta_path, content_path, records_count, retracted_pmcids, processed_archive_path = result
+                            if meta_path and content_path:
+                                generated_tsv_files.append((meta_path, content_path))
+                            if retracted_pmcids:
+                                daily_retractions_to_process.extend(retracted_pmcids)
+                            total_records_upserted += records_count
+                            total_archives_processed += 1
+                            # Always update last_processed_file with the most recent one we've handled
+                            last_processed_file = processed_archive_path
+                            typer.echo(f"  ...parsed {records_count} records from archive {update_info.archive_path}.")
+            else:
+                typer.echo("Parsing archives sequentially with 1 worker...")
+                for archive_path, (local_path, update_info) in downloaded_archives.items():
+                    result = _parse_delta_archive_worker(local_path, update_info, source, tmp_path)
                     if result:
                         meta_path, content_path, records_count, retracted_pmcids, processed_archive_path = result
                         if meta_path and content_path:

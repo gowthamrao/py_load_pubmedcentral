@@ -233,70 +233,74 @@ class PostgreSQLAdapter(DatabaseAdapter):
             )
             self.conn.commit()
 
-    def bulk_upsert_articles(self, metadata_file_path: str, content_file_path: str):
+    def bulk_upsert_articles(
+        self, metadata_file_path: str, content_file_path: str, is_full_load: bool = False
+    ):
         """
-        Performs a transactional bulk "upsert" (insert or update) for article
-        data. It uses temporary tables and PostgreSQL's INSERT...ON CONFLICT
-        command to efficiently merge new and updated data.
+        Performs a transactional bulk "upsert" (for delta loads) or a direct
+        bulk "insert" (for full loads).
+
+        For a full load, it performs a direct, high-performance COPY into the
+        main tables.
+
+        For a delta load, it uses temporary tables and PostgreSQL's
+        INSERT...ON CONFLICT command to efficiently merge new and updated data.
         """
         if not self.conn:
             self.connect()
 
-        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
-        content_columns = list(PmcArticlesContent.model_fields.keys())
+        if is_full_load:
+            # Optimized path for full load: direct COPY into main tables
+            with self.conn.cursor() as cursor:
+                sql_copy = "COPY {} FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
+                # Load metadata
+                with open(metadata_file_path, "r", encoding="utf-8") as f:
+                    cursor.copy_expert(sql_copy.format("pmc_articles_metadata"), f)
+                # Load content
+                with open(content_file_path, "r", encoding="utf-8") as f:
+                    cursor.copy_expert(sql_copy.format("pmc_articles_content"), f)
+            self.conn.commit()
+        else:
+            # Existing, robust path for delta loads using staging tables
+            metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+            content_columns = list(PmcArticlesContent.model_fields.keys())
 
-        with self.conn.cursor() as cursor:
-            # 1. Create temp tables that are automatically dropped on commit
-            cursor.execute("CREATE TEMP TABLE staging_metadata (LIKE pmc_articles_metadata) ON COMMIT DROP;")
-            cursor.execute("CREATE TEMP TABLE staging_content (LIKE pmc_articles_content) ON COMMIT DROP;")
+            with self.conn.cursor() as cursor:
+                # 1. Create temp tables
+                cursor.execute("CREATE TEMP TABLE staging_metadata (LIKE pmc_articles_metadata) ON COMMIT DROP;")
+                cursor.execute("CREATE TEMP TABLE staging_content (LIKE pmc_articles_content) ON COMMIT DROP;")
 
-            # 2. Bulk load data from files into the staging tables
-            sql_copy = "COPY {} FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
-            with open(metadata_file_path, "r", encoding="utf-8") as f:
-                cursor.copy_expert(sql_copy.format("staging_metadata"), f)
-            with open(content_file_path, "r", encoding="utf-8") as f:
-                cursor.copy_expert(sql_copy.format("staging_content"), f)
+                # 2. Bulk load data into staging tables
+                sql_copy = "COPY {} FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
+                with open(metadata_file_path, "r", encoding="utf-8") as f:
+                    cursor.copy_expert(sql_copy.format("staging_metadata"), f)
+                with open(content_file_path, "r", encoding="utf-8") as f:
+                    cursor.copy_expert(sql_copy.format("staging_content"), f)
 
-            # 3. Upsert metadata, returning the pmcids of rows that were
-            #    actually inserted or updated.
-            metadata_cols_str = ", ".join(metadata_columns)
-            update_cols_str = ", ".join([f"{col} = EXCLUDED.{col}" for col in metadata_columns if col != 'pmcid'])
-
-            upsert_metadata_sql = f"""
-                WITH upserted AS (
+                # 3. Upsert metadata
+                metadata_cols_str = ", ".join(metadata_columns)
+                update_cols_str = ", ".join([f"{col} = EXCLUDED.{col}" for col in metadata_columns if col != 'pmcid'])
+                upsert_metadata_sql = f"""
                     INSERT INTO pmc_articles_metadata ({metadata_cols_str})
                     SELECT * FROM staging_metadata
-                    ON CONFLICT (pmcid) DO UPDATE SET
-                        {update_cols_str}
-                    WHERE pmc_articles_metadata.source_last_updated IS NULL
-                       OR pmc_articles_metadata.source_last_updated < EXCLUDED.source_last_updated
-                    RETURNING pmcid
-                )
-                SELECT pmcid FROM upserted;
-            """
-            cursor.execute(upsert_metadata_sql)
-            affected_pmcids = [row[0] for row in cursor.fetchall()]
+                    ON CONFLICT (pmcid) DO UPDATE SET {update_cols_str}
+                    WHERE pmc_articles_metadata.source_last_updated IS NULL OR
+                          pmc_articles_metadata.source_last_updated < EXCLUDED.source_last_updated;
+                """
+                cursor.execute(upsert_metadata_sql)
 
-            if not affected_pmcids:
-                self.conn.commit()
-                return
+                # 4. Upsert content. We can simply upsert all content from staging,
+                # as the foreign key from metadata is the guard.
+                content_cols_str = ", ".join(content_columns)
+                update_content_cols_str = ", ".join([f"{col} = EXCLUDED.{col}" for col in content_columns if col != 'pmcid'])
+                upsert_content_sql = f"""
+                    INSERT INTO pmc_articles_content ({content_cols_str})
+                    SELECT * FROM staging_content
+                    ON CONFLICT (pmcid) DO UPDATE SET {update_content_cols_str};
+                """
+                cursor.execute(upsert_content_sql)
 
-            # 4. Upsert content only for the articles whose metadata was affected.
-            #    This ensures data consistency.
-            content_cols_str = ", ".join(content_columns)
-            update_content_cols_str = ", ".join([f"{col} = EXCLUDED.{col}" for col in content_columns if col != 'pmcid'])
-            pmcids_tuple = tuple(affected_pmcids)
-
-            upsert_content_sql = f"""
-                INSERT INTO pmc_articles_content ({content_cols_str})
-                SELECT {content_cols_str} FROM staging_content
-                WHERE pmcid IN %s
-                ON CONFLICT (pmcid) DO UPDATE SET
-                    {update_content_cols_str};
-            """
-            cursor.execute(upsert_content_sql, (pmcids_tuple,))
-
-        self.conn.commit()
+            self.conn.commit()
 
     def get_last_successful_run_info(self, run_type: str = "DELTA") -> Optional[tuple[datetime, str]]:
         """
