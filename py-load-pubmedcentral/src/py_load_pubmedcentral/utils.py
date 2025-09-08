@@ -3,20 +3,19 @@ Utility functions for the application.
 """
 from __future__ import annotations
 
-import os
-
+from py_load_pubmedcentral.config import settings
 from py_load_pubmedcentral.db import PostgreSQLAdapter
 
 
 def get_db_adapter() -> PostgreSQLAdapter:
     """
-    Creates a PostgreSQLAdapter instance from environment variables.
+    Creates a PostgreSQLAdapter instance from the application settings.
     """
     connection_params = {
-        "dbname": os.environ.get("DB_NAME", "pmc_db"),
-        "user": os.environ.get("DB_USER", "user"),
-        "password": os.environ.get("DB_PASSWORD", "password"),
-        "host": os.environ.get("DB_HOST", "localhost"),
-        "port": os.environ.get("DB_PORT", "5432"),
+        "dbname": settings.db_name,
+        "user": settings.db_user,
+        "password": settings.db_password,
+        "host": settings.db_host,
+        "port": settings.db_port,
     }
     return PostgreSQLAdapter(connection_params)
