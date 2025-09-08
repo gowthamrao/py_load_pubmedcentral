@@ -42,28 +42,111 @@ def test_get_article_file_list_s3_success(mock_boto_client):
 
 
 @patch("boto3.client")
-def test_download_file_s3_with_checksum(mock_boto_client, tmp_path: Path):
+def test_download_file_s3_success_with_matching_etag(mock_boto_client, tmp_path: Path):
     """
-    Tests that download_file calls the S3 client with ChecksumMode enabled.
+    Tests that download_file succeeds when the ETag matches the local file's hash.
     """
     # Arrange
     mock_s3 = MagicMock()
     mock_boto_client.return_value = mock_s3
-
     s3_key = "oa_package/00/00/PMC1.tar.gz"
-    destination_dir = tmp_path
+    destination_path = tmp_path / "PMC1.tar.gz"
+    dummy_etag = "d41d8cd98f00b204e9800998ecf8427e"  # MD5 of an empty string
+
+    # Mock S3 calls
+    mock_s3.head_object.return_value = {"ETag": f'"{dummy_etag}"'}
+
+    # Create a dummy downloaded file
+    destination_path.touch()
 
     # Act
     data_source = S3DataSource()
-    result_path = data_source.download_file(s3_key, destination_dir)
+    result_path = data_source.download_file(s3_key, tmp_path)
 
     # Assert
-    expected_path = destination_dir / "PMC1.tar.gz"
-    assert result_path == expected_path
-
+    assert result_path == destination_path
+    mock_s3.head_object.assert_called_once_with(Bucket="pmc-oa-opendata", Key=s3_key)
     mock_s3.download_file.assert_called_once_with(
-        Bucket="pmc-oa-opendata",
-        Key=s3_key,
-        Filename=str(expected_path),
-        ExtraArgs={"ChecksumMode": "ENABLED"},
+        Bucket="pmc-oa-opendata", Key=s3_key, Filename=str(destination_path)
+    )
+    assert destination_path.exists()  # File should not be deleted
+
+
+@patch("boto3.client")
+def test_download_file_s3_raises_error_on_mismatched_etag(mock_boto_client, tmp_path: Path):
+    """
+    Tests that download_file raises an IOError and deletes the file
+    when the ETag does not match the local file's hash.
+    """
+    # Arrange
+    mock_s3 = MagicMock()
+    mock_boto_client.return_value = mock_s3
+    s3_key = "oa_package/00/00/PMC1.tar.gz"
+    destination_path = tmp_path / "PMC1.tar.gz"
+    dummy_etag = "d41d8cd98f00b204e9800998ecf8427e"  # Correct ETag
+
+    mock_s3.head_object.return_value = {"ETag": f'"{dummy_etag}"'}
+
+    # Create a dummy file that will have a "wrong" hash
+    with open(destination_path, "w") as f:
+        f.write("some content")
+
+    # Act & Assert
+    data_source = S3DataSource()
+    with pytest.raises(IOError, match="Checksum mismatch"):
+        data_source.download_file(s3_key, tmp_path)
+
+    # Assert that the corrupt file was deleted
+    assert not destination_path.exists()
+    mock_s3.head_object.assert_called_once_with(Bucket="pmc-oa-opendata", Key=s3_key)
+
+
+@patch("boto3.client")
+def test_download_file_s3_skips_check_for_multipart_etag(mock_boto_client, tmp_path: Path):
+    """
+    Tests that download_file succeeds without a checksum check for multipart ETags.
+    """
+    # Arrange
+    mock_s3 = MagicMock()
+    mock_boto_client.return_value = mock_s3
+    s3_key = "oa_package/00/00/PMC1.tar.gz"
+    destination_path = tmp_path / "PMC1.tar.gz"
+    multipart_etag = "d41d8cd98f00b204e9800998ecf8427e-2" # ETag with a hyphen
+
+    mock_s3.head_object.return_value = {"ETag": f'"{multipart_etag}"'}
+    destination_path.touch()
+
+    # Act
+    data_source = S3DataSource()
+    with patch("hashlib.md5") as mock_md5:
+        result_path = data_source.download_file(s3_key, tmp_path)
+        # Assert that the hashing logic was never called
+        mock_md5.assert_not_called()
+
+    # Assert
+    assert result_path == destination_path
+    assert destination_path.exists()
+
+
+@patch("boto3.client")
+def test_download_file_s3_skips_check_for_non_archive_files(mock_boto_client, tmp_path: Path):
+    """
+    Tests that download_file skips checksum logic for non .tar.gz files.
+    """
+    # Arrange
+    mock_s3 = MagicMock()
+    mock_boto_client.return_value = mock_s3
+    s3_key = "oa_file_list.csv"  # A file that shouldn't be checksummed
+    destination_path = tmp_path / "oa_file_list.csv"
+
+    # Act
+    data_source = S3DataSource()
+    result_path = data_source.download_file(s3_key, tmp_path)
+
+    # Assert
+    assert result_path == destination_path
+    # head_object should not be called for non-archive files
+    mock_s3.head_object.assert_not_called()
+    mock_s3.download_file.assert_called_once_with(
+        Bucket="pmc-oa-opendata", Key=s3_key, Filename=str(destination_path)
     )

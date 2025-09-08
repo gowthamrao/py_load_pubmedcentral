@@ -378,28 +378,62 @@ class S3DataSource(DataSource):
     )
     def download_file(self, url: str, destination_dir: Path) -> Path:
         """
-        Downloads a file from S3, verifying its integrity using server-side checksums.
+        Downloads a file from S3, verifying its integrity using its ETag (MD5 hash).
         Retries on transient AWS client errors.
         """
         s3_key = url
         local_filename = s3_key.split('/')[-1]
         destination_path = destination_dir / local_filename
 
+        expected_checksum = None
+        # Only perform checksum validation for the actual data archives.
+        if s3_key.endswith(".tar.gz"):
+            print(f"Getting ETag for s3://{self.BUCKET_NAME}/{s3_key}...")
+            try:
+                metadata = self.s3.head_object(Bucket=self.BUCKET_NAME, Key=s3_key)
+                etag = metadata.get("ETag", "").strip('"')
+
+                # S3 ETags for multipart uploads are not MD5 hashes. They contain a hyphen.
+                # In this case, we cannot perform a simple MD5 check.
+                if "-" in etag:
+                    print(f"Warning: Skipping ETag check for multipart upload file {s3_key}.")
+                else:
+                    expected_checksum = etag
+            except ClientError as e:
+                print(f"Could not retrieve ETag for {s3_key}: {e}. Download will proceed without verification.")
+
         print(f"Downloading s3://{self.BUCKET_NAME}/{s3_key} to {destination_path}...")
         try:
-            # For file lists, we don't need checksums. For archives, we do.
-            extra_args = {"ChecksumMode": "ENABLED"} if s3_key.endswith(".tar.gz") else {}
             self.s3.download_file(
                 Bucket=self.BUCKET_NAME,
                 Key=s3_key,
                 Filename=str(destination_path),
-                ExtraArgs=extra_args,
             )
-            print(f"Successfully downloaded {local_filename}.")
-            return destination_path
         except ClientError as e:
-            print(f"Failed to download {s3_key}: {e}")
+            # Clean up partially downloaded file if it exists
+            if destination_path.exists():
+                destination_path.unlink()
             raise IOError(f"Failed to download {s3_key} from S3.") from e
+
+        # If we have a checksum, verify the downloaded file.
+        if expected_checksum:
+            print(f"Verifying checksum for {local_filename}...")
+            hasher = hashlib.md5()
+            with open(destination_path, 'rb') as f:
+                while chunk := f.read(8192):
+                    hasher.update(chunk)
+            actual_checksum = hasher.hexdigest()
+
+            if actual_checksum != expected_checksum:
+                destination_path.unlink()  # Clean up the corrupt file
+                raise IOError(
+                    f"Checksum mismatch for {local_filename}. "
+                    f"Expected {expected_checksum}, got {actual_checksum}."
+                )
+            print(f"Checksum verified for {local_filename}.")
+
+        print(f"Successfully downloaded {local_filename}.")
+        return destination_path
 
     def stream_article_infos_from_file_list(self, file_list_path: str) -> Generator[ArticleFileInfo, None, None]:
         """
