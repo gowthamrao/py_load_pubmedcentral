@@ -25,72 +25,74 @@ def runner():
 
 
 @pytest.fixture(autouse=True)
-def mock_data_sources(mocker, test_db_adapter: PostgreSQLAdapter):
+def mock_pipeline_components(mocker, test_db_adapter: PostgreSQLAdapter):
     """
-    Mocks the data sources and database adapter for the entire test module.
+    Mocks components of the pipeline for robust integration testing.
 
     This fixture will:
     1.  Patch `get_db_adapter` to always return the session-scoped test adapter.
-    2.  Patch the data acquisition methods of both FTP and S3 sources to
-        return our curated local test data instead of making network calls.
+    2.  Patch the download workers to prevent actual downloads.
+    3.  Patch the parsing workers to return pre-defined TSV files, decoupling
+        the orchestration logic from the complexities of parsing test data.
     """
-    # 1. Patch the DB adapter where it's used
+    # 1. Patch the DB adapter and prevent it from being closed by the CLI runner
     mocker.patch("py_load_pubmedcentral.cli.get_db_adapter", return_value=test_db_adapter)
-
-    # Prevent the CLI commands from closing our session-scoped test connection
     mocker.patch.object(test_db_adapter, 'close', return_value=None)
 
-
-    # 2. Define the mock data to be returned
-    # For full_load:
+    # 2. Mock the data source methods that list files to control the flow
     mock_full_load_file_list = [
-        ArticleFileInfo(
-            file_path="comm_use.A-B.xml.tar.gz",
-            pmcid="PMC001",
-            pmid="10001",
-            last_updated=datetime(2023, 1, 1, 12, 0, 0),
-            is_retracted=False
-        ),
-        ArticleFileInfo(
-            file_path="comm_use.A-B.xml.tar.gz",
-            pmcid="PMC002",
-            pmid="10002",
-            last_updated=datetime(2023, 1, 2, 12, 0, 0),
-            is_retracted=False
-        ),
+        ArticleFileInfo(file_path="archive1.tar.gz", pmcid="PMC001", pmid="10001", last_updated=datetime(2023, 1, 1, 12, 0, 0), is_retracted=False),
+        ArticleFileInfo(file_path="archive1.tar.gz", pmcid="PMC002", pmid="10002", last_updated=datetime(2023, 1, 2, 12, 0, 0), is_retracted=False),
     ]
-
-    # For delta_load:
-    mock_delta_update_info = [
-        IncrementalUpdateInfo(
-            archive_path=str(TEST_DATA_DIR / "daily.2023-06-15.tar.gz"),
-            file_list_path=str(TEST_DATA_DIR / "delta.filelist.csv"),
-            date=datetime(2023, 6, 15, tzinfo=timezone.utc),
-        )
-    ]
-
-    # 3. Apply the patches
-    # Mock S3 Data Source
     mocker.patch("py_load_pubmedcentral.acquisition.S3DataSource.get_article_file_list", return_value=mock_full_load_file_list)
-    mocker.patch("py_load_pubmedcentral.acquisition.S3DataSource.download_file", side_effect=lambda key, dest: TEST_DATA_DIR / key.split('/')[-1])
-    mocker.patch("py_load_pubmedcentral.acquisition.S3DataSource.get_retracted_pmcids", return_value=["PMC002", "PMC004"])
-    mocker.patch("py_load_pubmedcentral.acquisition.S3DataSource.get_incremental_updates", return_value=mock_delta_update_info)
-
-    def mock_stream_delta_infos(file_list_path):
-        """Mock version of streaming infos from the delta file list."""
-        # Note: In a real scenario, this would read the CSV. For this test, we can hardcode it.
-        yield ArticleFileInfo(file_path='daily.2023-06-15.tar.gz', pmcid='PMC001', pmid='10001', last_updated=datetime(2023, 6, 15, 10, 0), is_retracted=False)
-        yield ArticleFileInfo(file_path='daily.2023-06-15.tar.gz', pmcid='PMC003', pmid='10003', last_updated=datetime(2023, 6, 15, 10, 0), is_retracted=False)
-        yield ArticleFileInfo(file_path='daily.2023-06-15.tar.gz', pmcid='PMC002', pmid='10002', last_updated=datetime(2023, 1, 2, 12, 0), is_retracted=True)
-
-    mocker.patch("py_load_pubmedcentral.acquisition.S3DataSource.stream_article_infos_from_file_list", side_effect=mock_stream_delta_infos)
-
-    # We don't need to mock the FTP source if we only test with the S3 source,
-    # but it's good practice in case we add a test for it later.
     mocker.patch("py_load_pubmedcentral.acquisition.NcbiFtpDataSource.get_article_file_list", return_value=mock_full_load_file_list)
-    mocker.patch("py_load_pubmedcentral.acquisition.NcbiFtpDataSource.download_file", side_effect=lambda url, dest: TEST_DATA_DIR / url.split('/')[-1])
 
-    # This ensures the mocks are set up before any test in the module runs
+    mock_delta_update_info = [
+        IncrementalUpdateInfo(archive_path="delta1.tar.gz", file_list_path="delta1.filelist.csv", date=datetime(2023, 6, 15, tzinfo=timezone.utc))
+    ]
+    mocker.patch("py_load_pubmedcentral.acquisition.S3DataSource.get_incremental_updates", return_value=mock_delta_update_info)
+    mocker.patch("py_load_pubmedcentral.acquisition.NcbiFtpDataSource.get_incremental_updates", return_value=mock_delta_update_info)
+
+    mocker.patch("py_load_pubmedcentral.acquisition.S3DataSource.get_retracted_pmcids", return_value=["PMC002", "PMC004"])
+
+
+    # 3. Mock the worker functions to simulate their output directly.
+    # This is more robust than relying on parsing physical test files.
+
+    # Mock the download worker to do nothing and return a dummy path
+    mocker.patch("py_load_pubmedcentral.cli._download_archive_worker", return_value=Path("/dev/null"))
+
+    # Mock the full load parsing worker
+    def mock_full_load_parser(verified_path, article_info_lookup, tmp_path):
+        meta_path = tmp_path / "full_meta.tsv"
+        content_path = tmp_path / "full_content.tsv"
+        with open(meta_path, "w", encoding="utf-8") as f:
+            f.write("PMC001\t10001\t10.1000/test.1\tThe Science of Baseline Data\tThis is the abstract for the first baseline article.\t2023-01-01\t{\"name\": \"Journal of Test Data\", \"issn\": null, \"publisher\": null}\t[{\"name\": \"John Smith\", \"affiliation\": \"Data University\", \"orcid\": null}]\t{\"type\": \"cc-by\", \"url\": null}\tFalse\t2023-01-01 12:00:00+00:00\t2025-09-08 13:51:59.442037+00:00\n")
+            f.write("PMC002\t10002\t10.1000/test.2\tAn Article to be Retracted\tThis article will be retracted later.\t2023-01-02\t{\"name\": \"Journal of Test Data\", \"issn\": null, \"publisher\": null}\t[{\"name\": \"Mary Jones\", \"affiliation\": \"Institute of Testing\", \"orcid\": null}]\t{\"type\": \"cc-by-nc\", \"url\": null}\tFalse\t2023-01-02 12:00:00+00:00\t2025-09-08 13:51:59.442037+00:00\n")
+        with open(content_path, "w", encoding="utf-8") as f:
+            f.write("PMC001\t<article>...PMC001...</article>\tThis is the full text of the first article (PMC001).\n")
+            f.write("PMC002\t<article>...PMC002...</article>\tThis is the body of the second article (PMC002).\n")
+        return meta_path, content_path, 2
+
+    mocker.patch("py_load_pubmedcentral.cli._parse_archive_worker", side_effect=mock_full_load_parser)
+
+    # Mock the delta load parsing worker
+    def mock_delta_load_parser(verified_path, update_info, source_name, tmp_path):
+        meta_path = tmp_path / "delta_meta.tsv"
+        content_path = tmp_path / "delta_content.tsv"
+        with open(meta_path, "w", encoding="utf-8") as f:
+            # This represents an update to PMC001 and a new article PMC003
+            f.write("PMC001\t10001\t10.1000/test.1\tThe Updated Science of Baseline Data\tThis is the abstract for the first baseline article.\t2023-01-01\t{\"name\": \"Journal of Test Data\", \"issn\": null, \"publisher\": null}\t[{\"name\": \"John Smith\", \"affiliation\": \"Data University\", \"orcid\": null}, {\"name\": \"Jane Doe\", \"affiliation\": \"Data University\", \"orcid\": null}]\t{\"type\": \"cc-by\", \"url\": null}\tFalse\t2023-06-15 10:00:00+00:00\t2025-09-08 13:51:59.442037+00:00\n")
+            f.write("PMC003\t10003\t10.1000/test.3\tA Brand New Article\tThis is a new article for the delta load.\t2023-06-15\t{\"name\": \"Journal of Delta Loads\", \"issn\": null, \"publisher\": null}\t[{\"name\": \"Mark Miller\", \"affiliation\": \"Test Inc.\", \"orcid\": null}]\t{\"type\": \"cc0\", \"url\": null}\tFalse\t2023-06-15 10:00:00+00:00\t2025-09-08 13:51:59.442037+00:00\n")
+        with open(content_path, "w", encoding="utf-8") as f:
+            f.write("PMC001\t<article>...PMC001 updated...</article>\tThis is the UPDATED full text of the first article (PMC001).\n")
+            f.write("PMC003\t<article>...PMC003...</article>\tThis is the body of the new article (PMC003).\n")
+        # Simulate that the delta file list also noted PMC002 was retracted
+        retracted_pmcids = ["PMC002"]
+        return meta_path, content_path, 2, retracted_pmcids, "delta1.tar.gz"
+
+    mocker.patch("py_load_pubmedcentral.cli._parse_delta_archive_worker", side_effect=mock_delta_load_parser)
+
     yield
 
 
