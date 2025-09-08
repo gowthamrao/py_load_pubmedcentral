@@ -38,6 +38,7 @@ mypy = "*"
 black = "*"
 pytest-postgresql = "*"
 psycopg = {extras = ["binary"], version = "*"}
+pytest-mock = "*"
 
 [project.scripts]
 pmc-sync = "py_load_pubmedcentral.cli:app"

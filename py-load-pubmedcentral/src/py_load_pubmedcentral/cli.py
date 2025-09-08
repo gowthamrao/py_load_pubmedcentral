@@ -165,6 +165,9 @@ def full_load(
     generated_tsv_files = []
 
     try:
+        typer.echo("Validating database schema...")
+        adapter.validate_schema()
+
         run_id = adapter.start_run(run_type="FULL")
         typer.echo(f"Sync history started for run_id: {run_id}")
 
@@ -261,11 +264,11 @@ def _parse_delta_archive_worker(
     update_info: IncrementalUpdateInfo,
     source_name: DataSourceName,
     tmp_path: Path,
-) -> tuple[Path, Path, int, int, str] | None:
+) -> tuple[Path, Path, int, list[str], str] | None:
     """
     Helper function to parse a single delta archive in a process pool.
-    This handles getting the file list, handling retractions, and parsing.
-    Returns file paths, counts, and the archive path of the update package.
+    This handles getting the file list and parsing. It returns the list of
+    retracted PMCIDs instead of processing them directly.
     """
     # Each process needs its own instances
     adapter = get_db_adapter()
@@ -275,33 +278,28 @@ def _parse_delta_archive_worker(
     metadata_tsv_path = tmp_path / f"metadata_{run_uuid}.tsv"
     content_tsv_path = tmp_path / f"content_{run_uuid}.tsv"
     records_in_archive = 0
-    retracted_in_archive_count = 0
 
     try:
         # 1. Get the file list for this specific daily package.
         articles_in_archive = []
-        retracted_in_archive = []
+        retracted_pmcids = []
         try:
             daily_file_list_stream = data_source.stream_article_infos_from_file_list(update_info.file_list_path)
             for article_info in daily_file_list_stream:
                 articles_in_archive.append(article_info)
                 if article_info.is_retracted:
-                    retracted_in_archive.append(article_info.pmcid)
+                    retracted_pmcids.append(article_info.pmcid)
         except Exception as e:
             typer.secho(f"Could not parse file list {update_info.file_list_path}. Skipping archive. Error: {e}", fg=typer.colors.RED, err=True)
             return None
 
-        # 2. Handle any retractions specified in this daily file list.
-        if retracted_in_archive:
-            retracted_in_archive_count = adapter.handle_deletions(retracted_in_archive)
-
-        # 3. Filter out retracted articles from processing for this archive
+        # 2. Filter out retracted articles from parsing for this archive
         articles_to_process = [info for info in articles_in_archive if not info.is_retracted]
         if not articles_to_process:
-            # Still return the archive path so we can mark this file as "processed"
-            return None, None, 0, retracted_in_archive_count, update_info.archive_path
+            # Still return the archive path and retractions so we can mark this file as "processed"
+            return None, None, 0, retracted_pmcids, update_info.archive_path
 
-        # 4. Parse the archive and write to TSV.
+        # 3. Parse the archive and write to TSV.
         article_info_lookup = {info.pmcid: info for info in articles_to_process}
         article_generator = stream_and_parse_tar_gz_archive(verified_path, article_info_lookup)
         metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
@@ -314,7 +312,7 @@ def _parse_delta_archive_worker(
                 content_f.write(adapter._prepare_tsv_row(content, content_columns))
                 records_in_archive += 1
 
-        return metadata_tsv_path, content_tsv_path, records_in_archive, retracted_in_archive_count, update_info.archive_path
+        return metadata_tsv_path, content_tsv_path, records_in_archive, retracted_pmcids, update_info.archive_path
 
     except Exception as e:
         typer.secho(f"Failed to parse delta archive {verified_path.name}. Error: {e}", fg=typer.colors.RED, err=True)
@@ -356,8 +354,12 @@ def delta_load(
     total_retracted_count = 0
     last_processed_file = None
     generated_tsv_files = []
+    daily_retractions_to_process = []
 
     try:
+        typer.echo("Validating database schema...")
+        adapter.validate_schema()
+
         # 1. Get the info of the last successful run to define the delta window.
         last_run_info = adapter.get_last_successful_run_info()
         if last_run_info:
@@ -378,9 +380,9 @@ def delta_load(
 
         # 2. Handle Retractions from the main retractions.csv file.
         typer.echo("Processing full retraction list...")
-        retracted_pmcids = data_source.get_retracted_pmcids()
-        if retracted_pmcids:
-            updated_rows = adapter.handle_deletions(retracted_pmcids)
+        master_retracted_pmcids = data_source.get_retracted_pmcids()
+        if master_retracted_pmcids:
+            updated_rows = adapter.handle_deletions(master_retracted_pmcids)
             total_retracted_count += updated_rows
             typer.secho(f"Marked {updated_rows} articles as retracted based on master list.", fg=typer.colors.YELLOW)
 
@@ -401,7 +403,9 @@ def delta_load(
         if not incremental_updates:
             typer.secho("No new incremental updates found.", fg=typer.colors.GREEN)
             status = "SUCCESS"
-            adapter.end_run(run_id, status, last_file_processed=last_processed_file)
+            # Pass the master retraction count to the metrics
+            metrics = {"total_articles_retracted": total_retracted_count}
+            adapter.end_run(run_id, status, metrics, last_processed_file)
             return
 
         typer.echo(f"Found {len(incremental_updates)} incremental archives to process.")
@@ -440,11 +444,12 @@ def delta_load(
                     update_info = future_to_update_info[future]
                     result = future.result()
                     if result:
-                        meta_path, content_path, records_count, retracted_count, processed_archive_path = result
+                        meta_path, content_path, records_count, retracted_pmcids, processed_archive_path = result
                         if meta_path and content_path:
                             generated_tsv_files.append((meta_path, content_path))
+                        if retracted_pmcids:
+                            daily_retractions_to_process.extend(retracted_pmcids)
                         total_records_upserted += records_count
-                        total_retracted_count += retracted_count
                         total_archives_processed += 1
                         # Always update last_processed_file with the most recent one we've handled
                         last_processed_file = processed_archive_path
@@ -452,15 +457,25 @@ def delta_load(
 
             typer.secho(f"Successfully parsed {total_archives_processed} archives.", fg=typer.colors.GREEN)
 
-            # --- Phase 3: Sequential Loading ---
+            # --- Phase 3: Sequential Loading (Corrected Order) ---
+            # 3a. First, upsert all new and updated articles.
             typer.echo(f"Upserting data from {len(generated_tsv_files)} archives into the database...")
             for i, (meta_path, content_path) in enumerate(generated_tsv_files):
                 typer.echo(f"  Upserting file set {i+1} of {len(generated_tsv_files)}...")
                 adapter.bulk_upsert_articles(str(meta_path), str(content_path))
                 meta_path.unlink()
                 content_path.unlink()
-
             typer.secho("Database upsert complete.", fg=typer.colors.GREEN)
+
+            # 3b. Second, process all retractions found in the daily file lists.
+            if daily_retractions_to_process:
+                typer.echo(f"Processing {len(daily_retractions_to_process)} retractions from daily file lists...")
+                # Remove duplicates before processing
+                unique_daily_retractions = list(set(daily_retractions_to_process))
+                updated_rows = adapter.handle_deletions(unique_daily_retractions)
+                total_retracted_count += updated_rows
+                typer.secho(f"Marked {updated_rows} articles as retracted based on daily lists.", fg=typer.colors.YELLOW)
+
 
         status = "SUCCESS"
 

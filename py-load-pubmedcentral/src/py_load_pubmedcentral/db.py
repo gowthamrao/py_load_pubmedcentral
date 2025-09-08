@@ -76,12 +76,43 @@ class PostgreSQLAdapter(DatabaseAdapter):
 
     def validate_schema(self):
         """
-        (Placeholder) Validates that the required tables exist in the database.
+        Validates that the required tables and key columns exist in the database.
+        Raises RuntimeError if the schema is not valid.
         """
-        print("Validating schema...")
-        # In a real implementation, this would check for the existence of
-        # pmc_articles_metadata, pmc_articles_content, and sync_history tables.
-        pass
+        if not self.conn:
+            self.connect()
+
+        expected_schema = {
+            "pmc_articles_metadata": ["pmcid", "is_retracted", "source_last_updated"],
+            "pmc_articles_content": ["pmcid", "body_text"],
+            "sync_history": ["run_id", "status", "last_file_processed"],
+        }
+
+        with self.conn.cursor() as cursor:
+            for table, columns in expected_schema.items():
+                # Check if table exists
+                cursor.execute(
+                    "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = %s);",
+                    (table,),
+                )
+                if not cursor.fetchone()[0]:
+                    raise RuntimeError(
+                        f"Schema validation failed: Table '{table}' does not exist. "
+                        "Please run `pmc-sync initialize` first."
+                    )
+
+                # Check if key columns exist
+                for column in columns:
+                    cursor.execute(
+                        "SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_name = %s AND column_name = %s);",
+                        (table, column),
+                    )
+                    if not cursor.fetchone()[0]:
+                        raise RuntimeError(
+                            f"Schema validation failed: Column '{column}' does not exist in table '{table}'. "
+                            "The database schema may be out of date."
+                        )
+        print("Database schema validation successful.")
 
     def _prepare_tsv_row(self, model: BaseModel, columns: List[str]) -> str:
         """
@@ -97,8 +128,12 @@ class PostgreSQLAdapter(DatabaseAdapter):
                 escaped_value = value.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
                 row_values.append(escaped_value)
             elif isinstance(value, BaseModel):
-                # For nested Pydantic models (JSONB fields)
+                # For nested Pydantic models (JSONB fields), e.g., JournalInfo
                 row_values.append(value.model_dump_json())
+            elif isinstance(value, list):
+                # For lists of nested models (JSONB fields), e.g., Contributor
+                list_of_dicts = [m.model_dump() for m in value]
+                row_values.append(json.dumps(list_of_dicts))
             else:
                 row_values.append(str(value))
         return "\t".join(row_values) + "\n"
