@@ -9,7 +9,11 @@ from typing import IO, Generator, Optional, Tuple
 
 from lxml import etree
 
+import tarfile
+from pathlib import Path
+
 from py_load_pubmedcentral.models import (
+    ArticleFileInfo,
     Contributor,
     JournalInfo,
     LicenseInfo,
@@ -73,18 +77,17 @@ def _extract_contributors(article_element: etree._Element) -> list[Contributor]:
 
 def parse_jats_xml(
     xml_file: IO[bytes],
-    is_retracted: bool,
 ) -> Generator[Tuple[PmcArticlesMetadata, PmcArticlesContent], None, None]:
     """
     Parses a JATS XML file (or file-like object) and yields data models.
 
     This function is a generator that uses `lxml.iterparse` to process the XML
     incrementally, keeping memory usage low. The caller is responsible for
-    populating the `source_last_updated` field on the yielded metadata model.
+    populating the `source_last_updated` and `is_retracted` fields on the
+    yielded metadata model.
 
     Args:
         xml_file: A file-like object opened in binary mode.
-        is_retracted: The retraction status from the source metadata.
 
     Yields:
         A tuple containing (PmcArticlesMetadata, PmcArticlesContent) for each
@@ -147,7 +150,7 @@ def parse_jats_xml(
                 journal_info=journal_info,
                 contributors=_extract_contributors(elem),
                 license_info=license_info,
-                is_retracted=is_retracted,
+                is_retracted=False,  # Default, caller must populate this
                 source_last_updated=None,  # Caller must populate this
                 sync_timestamp=datetime.utcnow(),
             )
@@ -172,3 +175,33 @@ def parse_jats_xml(
             elem.clear()
 
     del context
+
+
+def stream_and_parse_tar_gz_archive(
+    tar_gz_path: Path,
+    article_info_lookup: dict[str, ArticleFileInfo],
+) -> Generator[Tuple[PmcArticlesMetadata, PmcArticlesContent], None, None]:
+    """
+    Opens a local .tar.gz archive, finds XML files for target articles,
+    parses them, and yields data models.
+    """
+    with tarfile.open(name=tar_gz_path, mode="r|gz") as tar:
+        for member in tar:
+            if member.isfile() and member.name.lower().endswith((".xml", ".nxml")):
+                xml_file_obj = tar.extractfile(member)
+                if not xml_file_obj:
+                    continue
+
+                try:
+                    for metadata, content in parse_jats_xml(xml_file_obj):
+                        if metadata.pmcid in article_info_lookup:
+                            article_info = article_info_lookup[metadata.pmcid]
+                            metadata.source_last_updated = article_info.last_updated
+                            metadata.is_retracted = article_info.is_retracted
+                            yield metadata, content
+                except etree.XMLSyntaxError as e:
+                    print(f"Skipping malformed XML file {member.name}: {e}")
+                    continue
+                finally:
+                    if xml_file_obj:
+                        xml_file_obj.close()
