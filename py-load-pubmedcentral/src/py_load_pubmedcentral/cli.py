@@ -384,8 +384,10 @@ def delta_load(
     total_archives_processed = 0
     total_records_upserted = 0
     total_retracted_count = 0
-    last_processed_file = None
-    generated_tsv_files = []
+    # The last_processed_file is now managed transactionally in the DB,
+    # but we still need to track the latest one processed in this run
+    # to record it when the run completes successfully.
+    last_processed_file_in_this_run = None
     daily_retractions_to_process = []
 
     try:
@@ -395,9 +397,10 @@ def delta_load(
         # 1. Get the info of the last successful run to define the delta window.
         last_run_info = adapter.get_last_successful_run_info()
         if last_run_info:
-            last_sync_time, last_processed_file = last_run_info
+            last_sync_time, last_processed_file_in_this_run = last_run_info
             typer.echo(f"Looking for updates since last successful sync at {last_sync_time.isoformat()}.")
-            typer.echo(f"Last processed file was: {last_processed_file}")
+            if last_processed_file_in_this_run:
+                typer.echo(f"Resuming after last processed file: {last_processed_file_in_this_run}")
         else:
             # If no previous delta load, get time from the last full load.
             last_full_load_run = adapter.get_last_successful_run_info("FULL")
@@ -423,10 +426,10 @@ def delta_load(
         incremental_updates = data_source.get_incremental_updates(since=last_sync_time_utc)
 
         # Filter out any files that were already processed in the last run.
-        if last_processed_file:
+        if last_processed_file_in_this_run:
             try:
                 # Find the index of the last processed file and slice the list
-                last_file_index = [u.archive_path for u in incremental_updates].index(last_processed_file)
+                last_file_index = [u.archive_path for u in incremental_updates].index(last_processed_file_in_this_run)
                 incremental_updates = incremental_updates[last_file_index + 1:]
             except ValueError:
                 # This can happen if the last processed file is no longer listed, which is fine.
@@ -437,7 +440,7 @@ def delta_load(
             status = "SUCCESS"
             # Pass the master retraction count to the metrics
             metrics = {"total_articles_retracted": total_retracted_count}
-            adapter.end_run(run_id, status, metrics, last_processed_file)
+            adapter.end_run(run_id, status, metrics, last_processed_file_in_this_run)
             return
 
         typer.echo(f"Found {len(incremental_updates)} incremental archives to process.")
@@ -462,73 +465,85 @@ def delta_load(
 
             typer.secho(f"Successfully downloaded {len(downloaded_archives)} archives.", fg=typer.colors.GREEN)
 
-            # --- Phase 2: Parallel Parsing ---
+            # --- Phase 2: Parallel Parsing and Transactional Loading ---
             if parsing_workers > 1:
                 with concurrent.futures.ProcessPoolExecutor(max_workers=parsing_workers) as executor:
                     future_to_update_info = {
                         executor.submit(_parse_delta_archive_worker, local_path, update_info, source, tmp_path): update_info
                         for local_path, update_info in downloaded_archives.values()
                     }
-                    typer.echo(f"Parsing {len(future_to_update_info)} archives with {parsing_workers} workers...")
-                    # Process futures in the original submission order to correctly track the last file
+                    typer.echo(f"Parsing and loading {len(future_to_update_info)} archives with {parsing_workers} workers...")
+                    # Process futures in submission order to ensure we process days sequentially
                     sorted_futures = [f for f, u in sorted(future_to_update_info.items(), key=lambda item: item[1].date)]
 
                     for future in sorted_futures:
-                        update_info = future_to_update_info[future]
                         result = future.result()
                         if result:
                             meta_path, content_path, records_count, retracted_pmcids, processed_archive_path = result
-                            if meta_path and content_path:
-                                generated_tsv_files.append((meta_path, content_path))
+
+                            # If there are records to load, call the new transactional method
+                            if meta_path and content_path and records_count > 0:
+                                typer.echo(f"  -> Loading {records_count} records from {processed_archive_path}...")
+                                adapter.bulk_upsert_and_update_state(
+                                    run_id=run_id,
+                                    metadata_file_path=str(meta_path),
+                                    content_file_path=str(content_path),
+                                    file_processed=processed_archive_path,
+                                )
+                                meta_path.unlink()
+                                content_path.unlink()
+
+                            # Collect retractions to be processed at the end
                             if retracted_pmcids:
                                 daily_retractions_to_process.extend(retracted_pmcids)
+
                             total_records_upserted += records_count
                             total_archives_processed += 1
-                            # Always update last_processed_file with the most recent one we've handled
-                            last_processed_file = processed_archive_path
-                            typer.echo(f"  ...parsed {records_count} records from archive {update_info.archive_path}.")
+                            # Update our tracker for the last file processed in this run
+                            last_processed_file_in_this_run = processed_archive_path
             else:
-                typer.echo("Parsing archives sequentially with 1 worker...")
-                for archive_path, (local_path, update_info) in downloaded_archives.items():
+                typer.echo("Parsing and loading archives sequentially with 1 worker...")
+                # Sort by date to process sequentially
+                sorted_archives = sorted(downloaded_archives.items(), key=lambda item: item[1][1].date)
+                for archive_path, (local_path, update_info) in sorted_archives:
                     result = _parse_delta_archive_worker(local_path, update_info, source, tmp_path)
                     if result:
                         meta_path, content_path, records_count, retracted_pmcids, processed_archive_path = result
-                        if meta_path and content_path:
-                            generated_tsv_files.append((meta_path, content_path))
+                        if meta_path and content_path and records_count > 0:
+                            typer.echo(f"  -> Loading {records_count} records from {processed_archive_path}...")
+                            adapter.bulk_upsert_and_update_state(
+                                run_id=run_id,
+                                metadata_file_path=str(meta_path),
+                                content_file_path=str(content_path),
+                                file_processed=processed_archive_path,
+                            )
+                            meta_path.unlink()
+                            content_path.unlink()
+
                         if retracted_pmcids:
                             daily_retractions_to_process.extend(retracted_pmcids)
+
                         total_records_upserted += records_count
                         total_archives_processed += 1
-                        # Always update last_processed_file with the most recent one we've handled
-                        last_processed_file = processed_archive_path
-                        typer.echo(f"  ...parsed {records_count} records from archive {update_info.archive_path}.")
+                        # Update our tracker for the last file processed in this run
+                        last_processed_file_in_this_run = processed_archive_path
 
-            typer.secho(f"Successfully parsed {total_archives_processed} archives.", fg=typer.colors.GREEN)
+            typer.secho(f"Successfully processed {total_archives_processed} archives.", fg=typer.colors.GREEN)
 
-            # --- Phase 3: Sequential Loading (Corrected Order) ---
-            # 3a. First, upsert all new and updated articles.
-            typer.echo(f"Upserting data from {len(generated_tsv_files)} archives into the database...")
-            for i, (meta_path, content_path) in enumerate(generated_tsv_files):
-                typer.echo(f"  Upserting file set {i+1} of {len(generated_tsv_files)}...")
-                adapter.bulk_upsert_articles(str(meta_path), str(content_path))
-                meta_path.unlink()
-                content_path.unlink()
-            typer.secho("Database upsert complete.", fg=typer.colors.GREEN)
-
-            # 3b. Second, process all retractions found in the daily file lists.
+            # --- Phase 3: Final Retraction Handling ---
             if daily_retractions_to_process:
                 typer.echo(f"Processing {len(daily_retractions_to_process)} retractions from daily file lists...")
-                # Remove duplicates before processing
                 unique_daily_retractions = list(set(daily_retractions_to_process))
                 updated_rows = adapter.handle_deletions(unique_daily_retractions)
                 total_retracted_count += updated_rows
                 typer.secho(f"Marked {updated_rows} articles as retracted based on daily lists.", fg=typer.colors.YELLOW)
 
-
         status = "SUCCESS"
 
     except Exception as e:
+        status = "FAILED"
         typer.secho(f"A critical error occurred during delta-load: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     finally:
         if adapter:
             if run_id:
@@ -540,7 +555,7 @@ def delta_load(
                     "parsing_workers": parsing_workers,
                 }
                 typer.echo(f"Updating sync_history for run_id {run_id} with status '{status}'...")
-                adapter.end_run(run_id, status, metrics, last_processed_file)
+                adapter.end_run(run_id, status, metrics, last_processed_file_in_this_run)
             adapter.close()
 
 
