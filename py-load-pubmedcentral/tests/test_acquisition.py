@@ -139,3 +139,30 @@ def test_download_file_checksum_failure(mock_requests_get, tmp_path):
     # Check that the corrupt file was cleaned up
     destination_path = tmp_path / "test_file.tar.gz"
     assert not destination_path.exists()
+
+
+def test_download_file_retry_logic(mock_requests_get, tmp_path):
+    """
+    Tests that the download_file method retries on failure.
+    """
+    file_content = b"This is a test file."
+    file_hash = hashlib.md5(file_content).hexdigest()
+    md5_content = f"MD5(test_file.tar.gz)= {file_hash}"
+    url = "https://fake.host/test_file.tar.gz"
+
+    # Simulate two network failures, then success.
+    mock_requests_get.side_effect = [
+        requests.exceptions.RequestException("Connection error"),
+        requests.exceptions.RequestException("Timeout"),
+        MockResponse(file_content),
+        MockResponse(md5_content.encode("utf-8")),
+    ]
+
+    data_source = NcbiFtpDataSource()
+    destination_path = data_source.download_file(url, tmp_path)
+
+    # The first call to download the file should be attempted 3 times.
+    # The second call to download the MD5 file should be attempted 1 time.
+    assert mock_requests_get.call_count == 4
+    assert destination_path.exists()
+    assert destination_path.read_bytes() == file_content

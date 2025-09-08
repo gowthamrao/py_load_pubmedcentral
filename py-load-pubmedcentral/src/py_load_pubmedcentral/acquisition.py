@@ -19,6 +19,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from lxml import etree
 from pydantic import BaseModel
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from py_load_pubmedcentral.models import (
     ArticleFileInfo,
@@ -192,10 +193,16 @@ class NcbiFtpDataSource(DataSource):
             print(f"Failed to download retractions file: {e}")
             return []
 
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception_type(requests.RequestException),
+        reraise=True,
+    )
     def download_file(self, url: str, destination_dir: Path) -> Path:
         """
         Downloads a file from a URL, verifies its MD5 checksum, and saves
-        it to a local directory.
+        it to a local directory. Retries on transient network errors.
         """
         local_filename = url.split('/')[-1]
         destination_path = destination_dir / local_filename
@@ -363,9 +370,16 @@ class S3DataSource(DataSource):
             print(f"Failed to download retractions file from S3: {e}")
             return []
 
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception_type(ClientError),
+        reraise=True,
+    )
     def download_file(self, url: str, destination_dir: Path) -> Path:
         """
         Downloads a file from S3, verifying its integrity using server-side checksums.
+        Retries on transient AWS client errors.
         """
         s3_key = url
         local_filename = s3_key.split('/')[-1]
