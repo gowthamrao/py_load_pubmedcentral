@@ -13,6 +13,10 @@ import psycopg2
 from pydantic import BaseModel
 
 from py_load_pubmedcentral.models import PmcArticlesContent, PmcArticlesMetadata
+from py_load_pubmedcentral.utils import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class DatabaseAdapter(ABC):
@@ -122,7 +126,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
                             f"Schema validation failed: Column '{column}' does not exist in table '{table}'. "
                             "The database schema may be out of date."
                         )
-        print("Database schema validation successful.")
+        logger.info("Database schema validation successful.")
 
     def _prepare_tsv_row(self, model: BaseModel, columns: List[str]) -> str:
         """

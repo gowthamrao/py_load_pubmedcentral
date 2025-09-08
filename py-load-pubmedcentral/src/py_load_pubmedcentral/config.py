@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     db_port: int = 5432
     db_name: str = "pmc"
 
+    # Logging configuration
+    log_level: str = "INFO"
+
     model_config = SettingsConfigDict(env_prefix="PMC_")
 
 

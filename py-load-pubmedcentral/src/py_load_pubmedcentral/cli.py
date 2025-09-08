@@ -24,7 +24,10 @@ from py_load_pubmedcentral.acquisition import (
 )
 from py_load_pubmedcentral.parser import stream_and_parse_tar_gz_archive
 from py_load_pubmedcentral.models import PmcArticlesContent, PmcArticlesMetadata, ArticleFileInfo
-from py_load_pubmedcentral.utils import get_db_adapter
+from py_load_pubmedcentral.utils import get_db_adapter, get_logger
+
+
+logger = get_logger(__name__)
 
 app = typer.Typer(
     help="A high-throughput pipeline for synchronizing PubMed Central into a relational database."
@@ -45,25 +48,25 @@ def initialize(
     """
     Initialize the database schema by executing an SQL script.
     """
-    typer.echo("--- Initializing Database Schema ---")
+    logger.info("--- Initializing Database Schema ---")
     adapter = None
     try:
         adapter = get_db_adapter()
-        typer.echo(f"Connecting to PostgreSQL at {adapter.connection_params['host']}...")
+        logger.info(f"Connecting to PostgreSQL at {adapter.connection_params['host']}...")
 
-        typer.echo(f"Reading schema from '{db_schema_file}'...")
+        logger.info(f"Reading schema from '{db_schema_file}'...")
         with open(db_schema_file, "r", encoding="utf-8") as f:
             sql_script = f.read()
 
         adapter.execute_sql(sql_script)
 
-        typer.secho("Database schema initialized successfully.", fg=typer.colors.GREEN)
+        logger.info("Database schema initialized successfully.")
 
     except FileNotFoundError:
-        typer.secho(f"Error: Schema file not found at '{db_schema_file}'", fg=typer.colors.RED)
+        logger.error(f"Error: Schema file not found at '{db_schema_file}'")
         raise typer.Exit(code=1)
     except Exception as e:
-        typer.secho(f"An error occurred during database initialization: {e}", fg=typer.colors.RED)
+        logger.error(f"An error occurred during database initialization: {e}", exc_info=True)
         raise typer.Exit(code=1)
     finally:
         if adapter:
@@ -86,10 +89,9 @@ def _download_archive_worker(
     try:
         return data_source.download_file(file_identifier, tmp_path)
     except Exception as e:
-        typer.secho(
-            f"Failed to download/verify {file_identifier}. Error: {e}",
-            fg=typer.colors.RED,
-            err=True,
+        logger.error(
+            f"Failed to download/verify {file_identifier}",
+            exc_info=True
         )
         return None
 
@@ -124,10 +126,9 @@ def _parse_archive_worker(
 
         return metadata_tsv_path, content_tsv_path, records_in_archive
     except Exception as e:
-        typer.secho(
-            f"Failed to parse archive {verified_path.name}. Error: {e}",
-            fg=typer.colors.RED,
-            err=True,
+        logger.error(
+            f"Failed to parse archive {verified_path.name}",
+            exc_info=True
         )
         return None
     finally:
@@ -154,7 +155,7 @@ def full_load(
     Execute a full (baseline) load by discovering and processing all
     baseline archives from the selected data source in parallel.
     """
-    typer.echo(f"--- Starting Full Baseline Load from source: {source.value} ---")
+    logger.info(f"--- Starting Full Baseline Load from source: {source.value} ---")
     adapter = get_db_adapter()
     data_source: DataSource = S3DataSource() if source == DataSourceName.s3 else NcbiFtpDataSource()
 
@@ -165,32 +166,32 @@ def full_load(
     generated_tsv_files = []
 
     try:
-        typer.echo("Validating database schema...")
+        logger.info("Validating database schema...")
         adapter.validate_schema()
 
         run_id = adapter.start_run(run_type="FULL")
-        typer.echo(f"Sync history started for run_id: {run_id}")
+        logger.info(f"Sync history started for run_id: {run_id}")
 
-        typer.echo("Clearing existing article data for a clean baseline load...")
+        logger.info("Clearing existing article data for a clean baseline load...")
         truncate_sql = "TRUNCATE TABLE pmc_articles_content, pmc_articles_metadata RESTART IDENTITY;"
         adapter.execute_sql(truncate_sql)
-        typer.secho("Existing data cleared.", fg=typer.colors.YELLOW)
+        logger.warning("Existing data cleared.")
 
-        typer.echo("Getting article file list from NCBI...")
+        logger.info("Getting article file list from NCBI...")
         article_file_list = data_source.get_article_file_list()
         if not article_file_list:
-            typer.secho("No article files found. Exiting.", fg=typer.colors.YELLOW)
+            logger.warning("No article files found. Exiting.")
             status = "SUCCESS"
             raise typer.Exit()
 
         articles_by_archive = collections.defaultdict(list)
         for article in article_file_list:
             articles_by_archive[article.file_path].append(article)
-        typer.echo(f"Discovered {len(articles_by_archive)} unique archives to process.")
+        logger.info(f"Discovered {len(articles_by_archive)} unique archives to process.")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            typer.echo(f"Using temporary directory: {tmp_path}")
+            logger.info(f"Using temporary directory: {tmp_path}")
 
             # --- Phase 1: Parallel Downloading ---
             downloaded_archives = {}
@@ -201,14 +202,14 @@ def full_load(
                     future = executor.submit(_download_archive_worker, file_identifier, source, tmp_path)
                     future_to_archive[future] = archive_path
 
-                typer.echo(f"Downloading {len(future_to_archive)} archives with {download_workers} workers...")
+                logger.info(f"Downloading {len(future_to_archive)} archives with {download_workers} workers...")
                 for future in concurrent.futures.as_completed(future_to_archive):
                     archive_path = future_to_archive[future]
                     result_path = future.result()
                     if result_path:
                         downloaded_archives[archive_path] = result_path
 
-            typer.secho(f"Successfully downloaded {len(downloaded_archives)} archives.", fg=typer.colors.GREEN)
+            logger.info(f"Successfully downloaded {len(downloaded_archives)} archives.")
 
             # --- Phase 2: Parallel Parsing ---
             if parsing_workers > 1:
@@ -219,7 +220,7 @@ def full_load(
                         article_info_lookup = {info.pmcid: info for info in articles_by_archive[archive_path]}
                         future = executor.submit(_parse_archive_worker, downloaded_path, article_info_lookup, tmp_path)
                         future_to_path[future] = downloaded_path
-                    typer.echo(f"Parsing {len(future_to_path)} archives with {parsing_workers} workers...")
+                    logger.info(f"Parsing {len(future_to_path)} archives with {parsing_workers} workers...")
                     for future in concurrent.futures.as_completed(future_to_path):
                         result = future.result()
                         if result:
@@ -227,10 +228,10 @@ def full_load(
                             generated_tsv_files.append((meta_path, content_path))
                             total_records_count += records_count
                             total_archives_processed += 1
-                            typer.echo(f"  ...parsed {records_count} records from archive.")
+                            logger.info(f"  ...parsed {records_count} records from archive.")
             else:
                 # Run sequentially if only one worker is specified
-                typer.echo("Parsing archives sequentially with 1 worker...")
+                logger.info("Parsing archives sequentially with 1 worker...")
                 for archive_path, downloaded_path in downloaded_archives.items():
                     article_info_lookup = {info.pmcid: info for info in articles_by_archive[archive_path]}
                     result = _parse_archive_worker(downloaded_path, article_info_lookup, tmp_path)
@@ -239,9 +240,9 @@ def full_load(
                         generated_tsv_files.append((meta_path, content_path))
                         total_records_count += records_count
                         total_archives_processed += 1
-                        typer.echo(f"  ...parsed {records_count} records from archive {archive_path}.")
+                        logger.info(f"  ...parsed {records_count} records from archive {archive_path}.")
 
-            typer.secho(f"Successfully parsed {total_archives_processed} archives.", fg=typer.colors.GREEN)
+            logger.info(f"Successfully parsed {total_archives_processed} archives.")
 
             # --- Phase 3: Aggregate and Load ---
             typer.echo("Aggregating parsed data...")
@@ -260,9 +261,9 @@ def full_load(
                             agg_content_f.write(content_f.read())
                         content_path.unlink()
 
-            typer.secho("Data aggregation complete.", fg=typer.colors.GREEN)
+            logger.info("Data aggregation complete.")
 
-            typer.echo("Loading all data into the database in a single transaction...")
+            logger.info("Loading all data into the database in a single transaction...")
             # Using bulk_upsert_articles ensures the load is atomic.
             # We pass is_full_load=True to use the optimized direct COPY path.
             adapter.bulk_upsert_articles(
@@ -271,12 +272,12 @@ def full_load(
             agg_metadata_path.unlink()
             agg_content_path.unlink()
 
-            typer.secho("Database loading complete.", fg=typer.colors.GREEN)
+            logger.info("Database loading complete.")
 
         status = "SUCCESS"
 
     except Exception as e:
-        typer.secho(f"A critical error occurred: {e}", fg=typer.colors.RED)
+        logger.critical("A critical error occurred during full_load", exc_info=True)
     finally:
         if adapter:
             if run_id:
@@ -286,7 +287,7 @@ def full_load(
                     "download_workers": download_workers,
                     "parsing_workers": parsing_workers,
                 }
-                typer.echo(f"Updating sync_history for run_id {run_id} with status '{status}'...")
+                logger.info(f"Updating sync_history for run_id {run_id} with status '{status}'...")
                 adapter.end_run(run_id, status, metrics)
             adapter.close()
 
@@ -322,7 +323,7 @@ def _parse_delta_archive_worker(
                 if article_info.is_retracted:
                     retracted_pmcids.append(article_info.pmcid)
         except Exception as e:
-            typer.secho(f"Could not parse file list {update_info.file_list_path}. Skipping archive. Error: {e}", fg=typer.colors.RED, err=True)
+            logger.error(f"Could not parse file list {update_info.file_list_path}. Skipping archive.", exc_info=True)
             return None
 
         # 2. Filter out retracted articles from parsing for this archive
@@ -347,7 +348,7 @@ def _parse_delta_archive_worker(
         return metadata_tsv_path, content_tsv_path, records_in_archive, retracted_pmcids, update_info.archive_path
 
     except Exception as e:
-        typer.secho(f"Failed to parse delta archive {verified_path.name}. Error: {e}", fg=typer.colors.RED, err=True)
+        logger.error(f"Failed to parse delta archive {verified_path.name}", exc_info=True)
         return None
     finally:
         if adapter:
@@ -375,7 +376,7 @@ def delta_load(
     Execute an incremental (delta) load using daily update packages
     from the last known successful run.
     """
-    typer.echo("--- Starting Delta Load ---")
+    logger.info("--- Starting Delta Load ---")
     adapter = get_db_adapter()
     data_source: DataSource = S3DataSource() if source == DataSourceName.s3 else NcbiFtpDataSource()
 
@@ -391,35 +392,35 @@ def delta_load(
     daily_retractions_to_process = []
 
     try:
-        typer.echo("Validating database schema...")
+        logger.info("Validating database schema...")
         adapter.validate_schema()
 
         # 1. Get the info of the last successful run to define the delta window.
         last_run_info = adapter.get_last_successful_run_info()
         if last_run_info:
             last_sync_time, last_processed_file_in_this_run = last_run_info
-            typer.echo(f"Looking for updates since last successful sync at {last_sync_time.isoformat()}.")
+            logger.info(f"Looking for updates since last successful sync at {last_sync_time.isoformat()}.")
             if last_processed_file_in_this_run:
-                typer.echo(f"Resuming after last processed file: {last_processed_file_in_this_run}")
+                logger.info(f"Resuming after last processed file: {last_processed_file_in_this_run}")
         else:
             # If no previous delta load, get time from the last full load.
             last_full_load_run = adapter.get_last_successful_run_info("FULL")
             if not last_full_load_run:
-                typer.secho("No successful 'FULL' load found. Please run a `full-load` first.", fg=typer.colors.RED)
+                logger.error("No successful 'FULL' load found. Please run a `full-load` first.")
                 raise typer.Exit(code=1)
             last_sync_time, _ = last_full_load_run
-            typer.echo(f"No previous DELTA sync found. Looking for updates since last FULL load at {last_sync_time.isoformat()}.")
+            logger.info(f"No previous DELTA sync found. Looking for updates since last FULL load at {last_sync_time.isoformat()}.")
 
         run_id = adapter.start_run(run_type="DELTA")
-        typer.echo(f"Sync history started for run_id: {run_id}")
+        logger.info(f"Sync history started for run_id: {run_id}")
 
         # 2. Handle Retractions from the main retractions.csv file.
-        typer.echo("Processing full retraction list...")
+        logger.info("Processing full retraction list...")
         master_retracted_pmcids = data_source.get_retracted_pmcids()
         if master_retracted_pmcids:
             updated_rows = adapter.handle_deletions(master_retracted_pmcids)
             total_retracted_count += updated_rows
-            typer.secho(f"Marked {updated_rows} articles as retracted based on master list.", fg=typer.colors.YELLOW)
+            logger.warning(f"Marked {updated_rows} articles as retracted based on master list.")
 
         # 3. Find new daily incremental update packages since the last run.
         last_sync_time_utc = last_sync_time.replace(tzinfo=timezone.utc)
@@ -436,18 +437,18 @@ def delta_load(
                 pass
 
         if not incremental_updates:
-            typer.secho("No new incremental updates found.", fg=typer.colors.GREEN)
+            logger.info("No new incremental updates found.")
             status = "SUCCESS"
             # Pass the master retraction count to the metrics
             metrics = {"total_articles_retracted": total_retracted_count}
             adapter.end_run(run_id, status, metrics, last_processed_file_in_this_run)
             return
 
-        typer.echo(f"Found {len(incremental_updates)} incremental archives to process.")
+        logger.info(f"Found {len(incremental_updates)} incremental archives to process.")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            typer.echo(f"Using temporary directory: {tmp_path}")
+            logger.info(f"Using temporary directory: {tmp_path}")
 
             # --- Phase 1: Parallel Downloading ---
             downloaded_archives = {} # Maps archive_path to (local_path, update_info)
@@ -456,14 +457,14 @@ def delta_load(
                     executor.submit(_download_archive_worker, update.archive_path, source, tmp_path): update
                     for update in incremental_updates
                 }
-                typer.echo(f"Downloading {len(future_to_update)} archives with {download_workers} workers...")
+                logger.info(f"Downloading {len(future_to_update)} archives with {download_workers} workers...")
                 for future in concurrent.futures.as_completed(future_to_update):
                     update_info = future_to_update[future]
                     result_path = future.result()
                     if result_path:
                         downloaded_archives[update_info.archive_path] = (result_path, update_info)
 
-            typer.secho(f"Successfully downloaded {len(downloaded_archives)} archives.", fg=typer.colors.GREEN)
+            logger.info(f"Successfully downloaded {len(downloaded_archives)} archives.")
 
             # --- Phase 2: Parallel Parsing and Transactional Loading ---
             if parsing_workers > 1:
@@ -472,7 +473,7 @@ def delta_load(
                         executor.submit(_parse_delta_archive_worker, local_path, update_info, source, tmp_path): update_info
                         for local_path, update_info in downloaded_archives.values()
                     }
-                    typer.echo(f"Parsing and loading {len(future_to_update_info)} archives with {parsing_workers} workers...")
+                    logger.info(f"Parsing and loading {len(future_to_update_info)} archives with {parsing_workers} workers...")
                     # Process futures in submission order to ensure we process days sequentially
                     sorted_futures = [f for f, u in sorted(future_to_update_info.items(), key=lambda item: item[1].date)]
 
@@ -483,7 +484,7 @@ def delta_load(
 
                             # If there are records to load, call the new transactional method
                             if meta_path and content_path and records_count > 0:
-                                typer.echo(f"  -> Loading {records_count} records from {processed_archive_path}...")
+                                logger.info(f"  -> Loading {records_count} records from {processed_archive_path}...")
                                 adapter.bulk_upsert_and_update_state(
                                     run_id=run_id,
                                     metadata_file_path=str(meta_path),
@@ -502,7 +503,7 @@ def delta_load(
                             # Update our tracker for the last file processed in this run
                             last_processed_file_in_this_run = processed_archive_path
             else:
-                typer.echo("Parsing and loading archives sequentially with 1 worker...")
+                logger.info("Parsing and loading archives sequentially with 1 worker...")
                 # Sort by date to process sequentially
                 sorted_archives = sorted(downloaded_archives.items(), key=lambda item: item[1][1].date)
                 for archive_path, (local_path, update_info) in sorted_archives:
@@ -510,7 +511,7 @@ def delta_load(
                     if result:
                         meta_path, content_path, records_count, retracted_pmcids, processed_archive_path = result
                         if meta_path and content_path and records_count > 0:
-                            typer.echo(f"  -> Loading {records_count} records from {processed_archive_path}...")
+                            logger.info(f"  -> Loading {records_count} records from {processed_archive_path}...")
                             adapter.bulk_upsert_and_update_state(
                                 run_id=run_id,
                                 metadata_file_path=str(meta_path),
@@ -528,21 +529,21 @@ def delta_load(
                         # Update our tracker for the last file processed in this run
                         last_processed_file_in_this_run = processed_archive_path
 
-            typer.secho(f"Successfully processed {total_archives_processed} archives.", fg=typer.colors.GREEN)
+            logger.info(f"Successfully processed {total_archives_processed} archives.")
 
             # --- Phase 3: Final Retraction Handling ---
             if daily_retractions_to_process:
-                typer.echo(f"Processing {len(daily_retractions_to_process)} retractions from daily file lists...")
+                logger.info(f"Processing {len(daily_retractions_to_process)} retractions from daily file lists...")
                 unique_daily_retractions = list(set(daily_retractions_to_process))
                 updated_rows = adapter.handle_deletions(unique_daily_retractions)
                 total_retracted_count += updated_rows
-                typer.secho(f"Marked {updated_rows} articles as retracted based on daily lists.", fg=typer.colors.YELLOW)
+                logger.warning(f"Marked {updated_rows} articles as retracted based on daily lists.")
 
         status = "SUCCESS"
 
     except Exception as e:
         status = "FAILED"
-        typer.secho(f"A critical error occurred during delta-load: {e}", fg=typer.colors.RED, err=True)
+        logger.critical("A critical error occurred during delta-load", exc_info=True)
         raise typer.Exit(code=1)
     finally:
         if adapter:
@@ -554,7 +555,7 @@ def delta_load(
                     "download_workers": download_workers,
                     "parsing_workers": parsing_workers,
                 }
-                typer.echo(f"Updating sync_history for run_id {run_id} with status '{status}'...")
+                logger.info(f"Updating sync_history for run_id {run_id} with status '{status}'...")
                 adapter.end_run(run_id, status, metrics, last_processed_file_in_this_run)
             adapter.close()
 

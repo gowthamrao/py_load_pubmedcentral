@@ -20,6 +20,10 @@ from py_load_pubmedcentral.models import (
     PmcArticlesContent,
     PmcArticlesMetadata,
 )
+from py_load_pubmedcentral.utils import get_logger
+
+
+logger = get_logger(__name__)
 
 
 def _get_text(element: etree._Element, path: str) -> Optional[str]:
@@ -164,8 +168,8 @@ def parse_jats_xml(
             yield (metadata_model, content_model)
 
         except Exception as e:
-            # In a real application, use structured logging here.
-            print(f"Error processing an article: {e}")
+            # Using logger.error will also capture the traceback with exc_info=True
+            logger.error("Error processing an article", exc_info=True)
             # The 'recover=True' in iterparse helps, but we add this for safety.
             continue
         finally:
@@ -200,7 +204,7 @@ def stream_and_parse_tar_gz_archive(
                             metadata.is_retracted = article_info.is_retracted
                             yield metadata, content
                 except etree.XMLSyntaxError as e:
-                    print(f"Skipping malformed XML file {member.name}: {e}")
+                    logger.warning(f"Skipping malformed XML file {member.name}: {e}")
                     continue
                 finally:
                     if xml_file_obj:

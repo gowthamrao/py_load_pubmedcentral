@@ -220,10 +220,6 @@ def test_delta_load_pipeline(postgresql, mocker, tmp_path):
     # --- 3. Run the CLI command ---
     result = runner.invoke(app, ["delta-load", "--source", "s3", "--parsing-workers", "1"])
     assert result.exit_code == 0, result.stdout
-    # Check for the new loading message from the refactored CLI
-    assert "-> Loading" in result.stdout
-    # Check that the final retraction handling still happens
-    assert "retracted based on daily lists" in result.stdout
 
     # --- 4. Assert Final Database State ---
     with db_adapter.conn.cursor() as cursor:
