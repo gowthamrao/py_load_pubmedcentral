@@ -7,6 +7,7 @@ import io
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import IO, Iterable, List, Optional
 
 import psycopg2
@@ -79,6 +80,15 @@ class DatabaseAdapter(ABC):
     @abstractmethod
     def update_run_state(self, run_id: int, last_file_processed: str):
         """Updates the last_file_processed field for an in-progress run."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def bulk_insert_from_files_for_full_load(
+        self, metadata_file_paths: List[str], content_file_paths: List[str]
+    ):
+        """
+        Perform a bulk insert for a full load from multiple intermediate files.
+        """
         raise NotImplementedError
 
 
@@ -385,6 +395,54 @@ class PostgreSQLAdapter(DatabaseAdapter):
             cursor.execute(update_state_sql, (file_processed, run_id))
 
         # The transaction is committed automatically when the `with` block exits
+        self.conn.commit()
+
+    def bulk_insert_from_files_for_full_load(
+        self, metadata_file_paths: List[str], content_file_paths: List[str]
+    ):
+        """
+        Performs a transactional bulk INSERT for a full load from multiple
+        intermediate TSV files.
+
+        It uses temporary staging tables to gather all data before inserting into
+        the main tables in a single, atomic operation. This is the optimized path
+        for full loads.
+        """
+        if not self.conn:
+            self.connect()
+
+        with self.conn.cursor() as cursor:
+            # 1. Create temp tables that are dropped automatically on commit.
+            cursor.execute("CREATE TEMP TABLE staging_metadata (LIKE pmc_articles_metadata) ON COMMIT DROP;")
+            cursor.execute("CREATE TEMP TABLE staging_content (LIKE pmc_articles_content) ON COMMIT DROP;")
+
+            # 2. Bulk load all provided TSV files into the staging tables.
+            sql_copy = "COPY {} FROM STDIN WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
+
+            # Load all metadata files
+            logger.info(f"Loading {len(metadata_file_paths)} metadata TSV files into staging table...")
+            for file_path in metadata_file_paths:
+                p = Path(file_path)
+                if p.exists() and p.stat().st_size > 0:
+                    with open(p, "r", encoding="utf-8") as f:
+                        cursor.copy_expert(sql_copy.format("staging_metadata"), f)
+
+            # Load all content files
+            logger.info(f"Loading {len(content_file_paths)} content TSV files into staging table...")
+            for file_path in content_file_paths:
+                p = Path(file_path)
+                if p.exists() and p.stat().st_size > 0:
+                    with open(p, "r", encoding="utf-8") as f:
+                        cursor.copy_expert(sql_copy.format("staging_content"), f)
+
+            # 3. Insert all data from staging tables into the main tables.
+            # This is a single, atomic operation.
+            logger.info("Moving data from staging to main tables...")
+            cursor.execute("INSERT INTO pmc_articles_metadata SELECT * FROM staging_metadata;")
+            cursor.execute("INSERT INTO pmc_articles_content SELECT * FROM staging_content;")
+            logger.info(f"Inserted {cursor.rowcount} records.")
+
+        # 4. Commit the transaction.
         self.conn.commit()
 
     def get_last_successful_run_info(self, run_type: str = "DELTA") -> Optional[tuple[datetime, str]]:

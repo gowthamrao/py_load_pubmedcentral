@@ -251,35 +251,20 @@ def full_load(
                         total_archives_processed += 1
                         logger.info(f"  ...parsed {records_count} records from archive {archive_path}.")
 
-            logger.info(f"Successfully parsed {total_archives_processed} archives.")
+            logger.info(f"Successfully parsed {total_archives_processed} archives, yielding {total_records_count} records.")
 
-            # --- Phase 3: Aggregate and Load ---
-            typer.echo("Aggregating parsed data...")
-            agg_metadata_path = tmp_path / "agg_metadata.tsv"
-            agg_content_path = tmp_path / "agg_content.tsv"
-
-            with open(agg_metadata_path, "w", encoding="utf-8") as agg_meta_f, \
-                 open(agg_content_path, "w", encoding="utf-8") as agg_content_f:
-                for meta_path, content_path in generated_tsv_files:
-                    if meta_path.exists():
-                        with open(meta_path, "r", encoding="utf-8") as meta_f:
-                            agg_meta_f.write(meta_f.read())
-                        meta_path.unlink()
-                    if content_path.exists():
-                        with open(content_path, "r", encoding="utf-8") as content_f:
-                            agg_content_f.write(content_f.read())
-                        content_path.unlink()
-
-            logger.info("Data aggregation complete.")
-
-            logger.info("Loading all data into the database in a single transaction...")
-            # Using bulk_upsert_articles ensures the load is atomic.
-            # We pass is_full_load=True to use the optimized direct COPY path.
-            adapter.bulk_upsert_articles(
-                str(agg_metadata_path), str(agg_content_path), is_full_load=True
-            )
-            agg_metadata_path.unlink()
-            agg_content_path.unlink()
+            # --- Phase 3: Optimized Loading ---
+            # No aggregation step. We load the generated TSV files directly.
+            if generated_tsv_files:
+                logger.info(f"Loading data from {len(generated_tsv_files)} batches into the database...")
+                # The new method handles the transaction and staging tables internally.
+                metadata_files, content_files = zip(*generated_tsv_files)
+                adapter.bulk_insert_from_files_for_full_load(
+                    metadata_file_paths=[str(p) for p in metadata_files if p],
+                    content_file_paths=[str(p) for p in content_files if p],
+                )
+            else:
+                logger.info("No new records were parsed, skipping database load.")
 
             logger.info("Database loading complete.")
 
