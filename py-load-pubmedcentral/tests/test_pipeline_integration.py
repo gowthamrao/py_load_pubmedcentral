@@ -164,6 +164,12 @@ def test_full_load_pipeline(runner: CliRunner, test_db_adapter: PostgreSQLAdapte
     init_result = runner.invoke(app, ["initialize", "--schema", schema_path])
     assert init_result.exit_code == 0
 
+    # TRUNCATE tables to ensure a clean state for this test, preventing
+    # state from leaking from other integration tests that ran before.
+    with test_db_adapter.conn.cursor() as cursor:
+        cursor.execute("TRUNCATE TABLE pmc_articles_metadata, pmc_articles_content, sync_history RESTART IDENTITY;")
+    test_db_adapter.conn.commit()
+
     # 2. Run the full load
     # We use minimal workers for deterministic testing.
     # The --source s3 is the default, but we specify it for clarity.
