@@ -9,6 +9,7 @@ from enum import Enum
 import concurrent.futures
 import os
 import uuid
+import contextlib
 
 import typer
 
@@ -22,6 +23,7 @@ from py_load_pubmedcentral.acquisition import (
     NcbiFtpDataSource,
     S3DataSource,
 )
+from py_load_pubmedcentral.config import settings
 from py_load_pubmedcentral.parser import stream_and_parse_tar_gz_archive
 from py_load_pubmedcentral.models import PmcArticlesContent, PmcArticlesMetadata, ArticleFileInfo
 from py_load_pubmedcentral.utils import get_db_adapter, get_logger
@@ -198,9 +200,8 @@ def full_load(
             articles_by_archive[article.file_path].append(article)
         logger.info(f"Discovered {len(articles_by_archive)} unique archives to process.")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            logger.info(f"Using temporary directory: {tmp_path}")
+        with _get_staging_directory() as tmp_path:
+            logger.info(f"Using staging directory: {tmp_path}")
 
             # --- Phase 1: Parallel Downloading ---
             downloaded_archives = {}
@@ -357,6 +358,27 @@ def _parse_delta_archive_worker(
             verified_path.unlink()
 
 
+@contextlib.contextmanager
+def _get_staging_directory() -> Path:
+    """
+    A context manager that provides a staging directory for temporary files.
+    If settings.staging_dir is configured, it uses that directory and does not
+    clean it up. Otherwise, it creates and uses a temporary directory that
+    is automatically cleaned up on exit.
+    """
+    if settings.staging_dir:
+        # Use the user-configured directory
+        staging_path = settings.staging_dir
+        staging_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Using persistent staging directory: {staging_path}")
+        yield staging_path
+    else:
+        # Use a temporary directory that will be cleaned up
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger.info(f"Using temporary staging directory: {tmpdir}")
+            yield Path(tmpdir)
+
+
 @app.command()
 def delta_load(
     source: DataSourceName = typer.Option(
@@ -443,9 +465,8 @@ def delta_load(
 
         logger.info(f"Found {len(incremental_updates)} incremental archives to process.")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            logger.info(f"Using temporary directory: {tmp_path}")
+        with _get_staging_directory() as tmp_path:
+            logger.info(f"Using staging directory: {tmp_path}")
 
             # --- Phase 1: Parallel Downloading ---
             downloaded_archives = {} # Maps archive_path to (local_path, update_info)

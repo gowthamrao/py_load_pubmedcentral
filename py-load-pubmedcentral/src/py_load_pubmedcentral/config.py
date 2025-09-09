@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +23,9 @@ class Settings(BaseSettings):
 
     # Logging configuration
     log_level: str = "INFO"
+
+    # Filesystem configuration
+    staging_dir: Optional[Path] = None
 
     model_config = SettingsConfigDict(env_prefix="PMC_")
 
