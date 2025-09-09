@@ -70,3 +70,22 @@ A delta load will find and process only the incremental updates that have been r
 ```bash
 poetry run pmc-sync delta-load
 ```
+
+## Testing
+
+This project uses `pytest` for testing. To run the full test suite, including integration tests that require Docker:
+
+1.  Ensure you have Docker installed and running.
+2.  Install the development dependencies:
+    ```bash
+    poetry install
+    ```
+3.  Run the tests:
+    ```bash
+    poetry run pytest
+    ```
+
+The test suite includes:
+- Unit tests for individual components.
+- Integration tests that use a temporary PostgreSQL database in a Docker container to validate database interactions.
+- A full end-to-end test for the `full-load` command to ensure the entire pipeline is working correctly.
