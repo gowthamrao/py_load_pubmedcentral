@@ -101,9 +101,11 @@ def _parse_archive_worker(
     article_info_lookup: dict[str, ArticleFileInfo],
     tmp_path: Path,
 ) -> tuple[Path, Path, int] | None:
-    """Helper function to parse a single archive in a process pool."""
+    """
+    Helper function to parse a single archive in a process pool.
+    This is now decoupled from the database adapter's implementation details.
+    """
     adapter = get_db_adapter()
-    records_in_archive = 0
     # Use UUID to ensure TSV filenames are unique across processes
     run_uuid = uuid.uuid4()
     metadata_tsv_path = tmp_path / f"metadata_{run_uuid}.tsv"
@@ -114,15 +116,22 @@ def _parse_archive_worker(
             verified_path,
             article_info_lookup,
         )
-        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
-        content_columns = list(PmcArticlesContent.model_fields.keys())
+        # Buffer articles from this archive in memory. This is a trade-off
+        # for cleaner separation of concerns. An archive is unlikely to be
+        # so large as to exhaust memory in a single process.
+        all_metadata, all_content = zip(*article_generator)
+        records_in_archive = len(all_metadata)
 
-        with open(metadata_tsv_path, "w", encoding="utf-8") as meta_f, \
-             open(content_tsv_path, "w", encoding="utf-8") as content_f:
-            for metadata, content in article_generator:
-                meta_f.write(adapter._prepare_tsv_row(metadata, metadata_columns))
-                content_f.write(adapter._prepare_tsv_row(content, content_columns))
-                records_in_archive += 1
+        if records_in_archive > 0:
+            # Use the adapter to write the models to TSV files, encapsulating
+            # the database-specific formatting logic within the adapter.
+            metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+            with open(metadata_tsv_path, "w", encoding="utf-8") as f:
+                adapter.write_models_to_tsv_file(all_metadata, metadata_columns, f)
+
+            content_columns = list(PmcArticlesContent.model_fields.keys())
+            with open(content_tsv_path, "w", encoding="utf-8") as f:
+                adapter.write_models_to_tsv_file(all_content, content_columns, f)
 
         return metadata_tsv_path, content_tsv_path, records_in_archive
     except Exception as e:
@@ -335,15 +344,21 @@ def _parse_delta_archive_worker(
         # 3. Parse the archive and write to TSV.
         article_info_lookup = {info.pmcid: info for info in articles_to_process}
         article_generator = stream_and_parse_tar_gz_archive(verified_path, article_info_lookup)
-        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
-        content_columns = list(PmcArticlesContent.model_fields.keys())
 
-        with open(metadata_tsv_path, "w", encoding="utf-8") as meta_f, \
-             open(content_tsv_path, "w", encoding="utf-8") as content_f:
-            for metadata, content in article_generator:
-                meta_f.write(adapter._prepare_tsv_row(metadata, metadata_columns))
-                content_f.write(adapter._prepare_tsv_row(content, content_columns))
-                records_in_archive += 1
+        # Buffer articles from this archive in memory to decouple parsing from writing.
+        buffered_articles = list(article_generator)
+        records_in_archive = len(buffered_articles)
+
+        if records_in_archive > 0:
+            all_metadata, all_content = zip(*buffered_articles)
+
+            metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+            with open(metadata_tsv_path, "w", encoding="utf-8") as f:
+                adapter.write_models_to_tsv_file(all_metadata, metadata_columns, f)
+
+            content_columns = list(PmcArticlesContent.model_fields.keys())
+            with open(content_tsv_path, "w", encoding="utf-8") as f:
+                adapter.write_models_to_tsv_file(all_content, content_columns, f)
 
         return metadata_tsv_path, content_tsv_path, records_in_archive, retracted_pmcids, update_info.archive_path
 
@@ -385,10 +400,7 @@ def delta_load(
     total_archives_processed = 0
     total_records_upserted = 0
     total_retracted_count = 0
-    # The last_processed_file is now managed transactionally in the DB,
-    # but we still need to track the latest one processed in this run
-    # to record it when the run completes successfully.
-    last_processed_file_in_this_run = None
+    last_processed_file = None
     daily_retractions_to_process = []
 
     try:
@@ -398,10 +410,10 @@ def delta_load(
         # 1. Get the info of the last successful run to define the delta window.
         last_run_info = adapter.get_last_successful_run_info()
         if last_run_info:
-            last_sync_time, last_processed_file_in_this_run = last_run_info
+            last_sync_time, last_processed_file = last_run_info
             logger.info(f"Looking for updates since last successful sync at {last_sync_time.isoformat()}.")
-            if last_processed_file_in_this_run:
-                logger.info(f"Resuming after last processed file: {last_processed_file_in_this_run}")
+            if last_processed_file:
+                logger.info(f"Resuming after last processed file: {last_processed_file}")
         else:
             # If no previous delta load, get time from the last full load.
             last_full_load_run = adapter.get_last_successful_run_info("FULL")
@@ -427,10 +439,10 @@ def delta_load(
         incremental_updates = data_source.get_incremental_updates(since=last_sync_time_utc)
 
         # Filter out any files that were already processed in the last run.
-        if last_processed_file_in_this_run:
+        if last_processed_file:
             try:
                 # Find the index of the last processed file and slice the list
-                last_file_index = [u.archive_path for u in incremental_updates].index(last_processed_file_in_this_run)
+                last_file_index = [u.archive_path for u in incremental_updates].index(last_processed_file)
                 incremental_updates = incremental_updates[last_file_index + 1:]
             except ValueError:
                 # This can happen if the last processed file is no longer listed, which is fine.
@@ -441,7 +453,7 @@ def delta_load(
             status = "SUCCESS"
             # Pass the master retraction count to the metrics
             metrics = {"total_articles_retracted": total_retracted_count}
-            adapter.end_run(run_id, status, metrics, last_processed_file_in_this_run)
+            adapter.end_run(run_id, status, metrics)
             return
 
         logger.info(f"Found {len(incremental_updates)} incremental archives to process.")
@@ -482,8 +494,8 @@ def delta_load(
                         if result:
                             meta_path, content_path, records_count, retracted_pmcids, processed_archive_path = result
 
-                            # If there are records to load, call the new transactional method
-                            if meta_path and content_path and records_count > 0:
+                            # If there are records to load, call the transactional method
+                            if records_count > 0:
                                 logger.info(f"  -> Loading {records_count} records from {processed_archive_path}...")
                                 adapter.bulk_upsert_and_update_state(
                                     run_id=run_id,
@@ -493,6 +505,11 @@ def delta_load(
                                 )
                                 meta_path.unlink()
                                 content_path.unlink()
+                            else:
+                                # If the archive was processed but had no data (e.g., only retractions),
+                                # still update the state to mark it as processed.
+                                logger.info(f"  -> No new records in {processed_archive_path}, updating state.")
+                                adapter.update_run_state(run_id, processed_archive_path)
 
                             # Collect retractions to be processed at the end
                             if retracted_pmcids:
@@ -500,8 +517,7 @@ def delta_load(
 
                             total_records_upserted += records_count
                             total_archives_processed += 1
-                            # Update our tracker for the last file processed in this run
-                            last_processed_file_in_this_run = processed_archive_path
+                            # State is updated transactionally
             else:
                 logger.info("Parsing and loading archives sequentially with 1 worker...")
                 # Sort by date to process sequentially
@@ -510,7 +526,7 @@ def delta_load(
                     result = _parse_delta_archive_worker(local_path, update_info, source, tmp_path)
                     if result:
                         meta_path, content_path, records_count, retracted_pmcids, processed_archive_path = result
-                        if meta_path and content_path and records_count > 0:
+                        if records_count > 0:
                             logger.info(f"  -> Loading {records_count} records from {processed_archive_path}...")
                             adapter.bulk_upsert_and_update_state(
                                 run_id=run_id,
@@ -520,14 +536,16 @@ def delta_load(
                             )
                             meta_path.unlink()
                             content_path.unlink()
+                        else:
+                            logger.info(f"  -> No new records in {processed_archive_path}, updating state.")
+                            adapter.update_run_state(run_id, processed_archive_path)
 
                         if retracted_pmcids:
                             daily_retractions_to_process.extend(retracted_pmcids)
 
                         total_records_upserted += records_count
                         total_archives_processed += 1
-                        # Update our tracker for the last file processed in this run
-                        last_processed_file_in_this_run = processed_archive_path
+                        # State is updated transactionally
 
             logger.info(f"Successfully processed {total_archives_processed} archives.")
 
@@ -556,7 +574,7 @@ def delta_load(
                     "parsing_workers": parsing_workers,
                 }
                 logger.info(f"Updating sync_history for run_id {run_id} with status '{status}'...")
-                adapter.end_run(run_id, status, metrics, last_processed_file_in_this_run)
+                adapter.end_run(run_id, status, metrics)
             adapter.close()
 
 

@@ -76,6 +76,11 @@ class DatabaseAdapter(ABC):
         """Execute a raw SQL statement."""
         raise NotImplementedError
 
+    @abstractmethod
+    def update_run_state(self, run_id: int, last_file_processed: str):
+        """Updates the last_file_processed field for an in-progress run."""
+        raise NotImplementedError
+
 
 class PostgreSQLAdapter(DatabaseAdapter):
     """Database adapter for PostgreSQL."""
@@ -128,7 +133,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
                         )
         logger.info("Database schema validation successful.")
 
-    def _prepare_tsv_row(self, model: BaseModel, columns: List[str]) -> str:
+    def __prepare_tsv_row(self, model: BaseModel, columns: List[str]) -> str:
         """
         Converts a Pydantic model into a single, escaped, tab-separated string.
         """
@@ -166,7 +171,7 @@ class PostgreSQLAdapter(DatabaseAdapter):
             tsv_file: An open file handle to write the TSV rows to.
         """
         for model in models:
-            tsv_row = self._prepare_tsv_row(model, columns)
+            tsv_row = self.__prepare_tsv_row(model, columns)
             tsv_file.write(tsv_row)
 
     def bulk_load_native(self, file_path: str, target_table: str):
@@ -224,27 +229,36 @@ class PostgreSQLAdapter(DatabaseAdapter):
         last_file_processed: Optional[str] = None,
     ):
         """
-        Updates a sync_history record to mark the end of a run.
-
-        Args:
-            run_id: The ID of the run to update.
-            status: The final status, e.g., 'SUCCESS' or 'FAILED'.
-            metrics: A dictionary of metrics to store as JSON.
-            last_file_processed: The name/path of the last file processed in the run.
+        Updates a sync_history record to mark the end of a run. It only updates
+        the last_file_processed column if a value is provided.
         """
         if not self.conn:
             self.connect()
 
-        sql = """
-            UPDATE sync_history
-            SET end_time = %s, status = %s, metrics = %s, last_file_processed = %s
-            WHERE run_id = %s;
-        """
         metrics_json = json.dumps(metrics) if metrics else None
+        now = datetime.now(timezone.utc)
+
+        if last_file_processed is not None:
+            # This path is taken by full_load, or a delta_load that failed
+            # before any files were processed transactionally.
+            sql = """
+                UPDATE sync_history
+                SET end_time = %s, status = %s, metrics = %s, last_file_processed = %s
+                WHERE run_id = %s;
+            """
+            params = (now, status, metrics_json, last_file_processed, run_id)
+        else:
+            # This path is taken by delta_load, where last_file_processed is
+            # updated transactionally with each batch.
+            sql = """
+                UPDATE sync_history
+                SET end_time = %s, status = %s, metrics = %s
+                WHERE run_id = %s;
+            """
+            params = (now, status, metrics_json, run_id)
+
         with self.conn.cursor() as cursor:
-            cursor.execute(
-                sql, (datetime.now(timezone.utc), status, metrics_json, last_file_processed, run_id)
-            )
+            cursor.execute(sql, params)
             self.conn.commit()
 
     def bulk_upsert_articles(
@@ -403,6 +417,19 @@ class PostgreSQLAdapter(DatabaseAdapter):
             if result:
                 return result[0], result[1]
         return None
+
+    def update_run_state(self, run_id: int, last_file_processed: str):
+        """
+        Updates just the last_file_processed for a given run.
+        This is used for archives that are successfully processed but contain
+        no new data to load (e.g., only retractions).
+        """
+        if not self.conn:
+            self.connect()
+        sql = "UPDATE sync_history SET last_file_processed = %s WHERE run_id = %s;"
+        with self.conn.cursor() as cursor:
+            cursor.execute(sql, (last_file_processed, run_id))
+        self.conn.commit()
 
     def handle_deletions(self, pmcids_to_retract: List[str]) -> int:
         """
