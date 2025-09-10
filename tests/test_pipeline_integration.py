@@ -4,7 +4,6 @@ End-to-end integration tests for the full and delta load pipelines.
 import pytest
 from pathlib import Path
 from typer.testing import CliRunner
-from unittest.mock import MagicMock
 
 from py_load_pubmedcentral.cli import app
 from py_load_pubmedcentral.db import PostgreSQLAdapter
@@ -94,64 +93,6 @@ def mock_pipeline_components(mocker, test_db_adapter: PostgreSQLAdapter):
     mocker.patch("py_load_pubmedcentral.cli._parse_delta_archive_worker", side_effect=mock_delta_load_parser)
 
     yield
-
-
-import pytest
-
-# ... (other imports)
-
-@pytest.mark.dependency()
-def test_full_load_pipeline(runner: CliRunner, test_db_adapter: PostgreSQLAdapter):
-    """
-    Tests the entire full_load pipeline: initialize -> full-load -> verify db.
-    """
-    # ... (rest of the test)
-
-@pytest.mark.dependency(depends=["test_full_load_pipeline"])
-def test_delta_load_pipeline(runner: CliRunner, test_db_adapter: PostgreSQLAdapter):
-    """
-    Tests the delta_load pipeline. Depends on the full_load test having run first.
-    """
-    # 1. Run the delta load
-    delta_load_result = runner.invoke(app, [
-        "delta-load",
-        "--source", "s3",
-        "--download-workers", "1",
-        "--parsing-workers", "1"
-    ])
-    assert delta_load_result.exit_code == 0, delta_load_result.stdout
-
-    # 2. Verify the data in the database
-    with test_db_adapter.conn.cursor() as cursor:
-        cursor.execute("SELECT pmcid, title, is_retracted FROM pmc_articles_metadata ORDER BY pmcid;")
-        records = cursor.fetchall()
-
-        # We should now have 3 articles in total
-        assert len(records) == 3
-
-        # PMC001: Should be updated
-        assert records[0][0] == "PMC001"
-        assert records[0][1] == "The Updated Science of Baseline Data"
-        assert records[0][2] is False  # is_retracted should still be False
-
-        # PMC002: Should be marked as retracted
-        assert records[1][0] == "PMC002"
-        assert records[1][2] is True  # is_retracted should now be True
-
-        # PMC003: Should be newly inserted
-        assert records[2][0] == "PMC003"
-        assert records[2][1] == "A Brand New Article"
-        assert records[2][2] is False
-
-        # Check sync history
-        cursor.execute("SELECT run_type, status FROM sync_history ORDER BY run_id;")
-        history_records = cursor.fetchall()
-        assert len(history_records) == 2
-        assert history_records[0] == ("FULL", "SUCCESS")
-        assert history_records[1] == ("DELTA", "SUCCESS")
-
-# The above change is incomplete. I need to add the dependency marker to the first test.
-# I'll do that now.
 
 @pytest.mark.dependency()
 def test_full_load_pipeline(runner: CliRunner, test_db_adapter: PostgreSQLAdapter):

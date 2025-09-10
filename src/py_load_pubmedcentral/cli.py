@@ -14,7 +14,7 @@ import contextlib
 import typer
 
 import collections
-from datetime import timezone, date
+from datetime import timezone
 from urllib.parse import urljoin
 
 from py_load_pubmedcentral.acquisition import (
@@ -90,7 +90,7 @@ def _download_archive_worker(
     data_source: DataSource = S3DataSource() if source_name == "s3" else NcbiFtpDataSource()
     try:
         return data_source.download_file(file_identifier, tmp_path)
-    except Exception as e:
+    except Exception:
         logger.error(
             f"Failed to download/verify {file_identifier}",
             exc_info=True
@@ -136,7 +136,7 @@ def _parse_archive_worker(
                 adapter.write_models_to_tsv_file(all_content, content_columns, f)
 
         return metadata_tsv_path, content_tsv_path, records_in_archive
-    except Exception as e:
+    except Exception:
         logger.error(
             f"Failed to parse archive {verified_path.name}",
             exc_info=True
@@ -271,7 +271,7 @@ def full_load(
 
         status = "SUCCESS"
 
-    except Exception as e:
+    except Exception:
         logger.critical("A critical error occurred during full_load", exc_info=True)
     finally:
         if adapter:
@@ -317,7 +317,7 @@ def _parse_delta_archive_worker(
                 articles_in_archive.append(article_info)
                 if article_info.is_retracted:
                     retracted_pmcids.append(article_info.pmcid)
-        except Exception as e:
+        except Exception:
             logger.error(f"Could not parse file list {update_info.file_list_path}. Skipping archive.", exc_info=True)
             return None
 
@@ -348,7 +348,7 @@ def _parse_delta_archive_worker(
 
         return metadata_tsv_path, content_tsv_path, records_in_archive, retracted_pmcids, update_info.archive_path
 
-    except Exception as e:
+    except Exception:
         logger.error(f"Failed to parse delta archive {verified_path.name}", exc_info=True)
         return None
     finally:
@@ -565,7 +565,7 @@ def delta_load(
 
         status = "SUCCESS"
 
-    except Exception as e:
+    except Exception:
         status = "FAILED"
         logger.critical("A critical error occurred during delta-load", exc_info=True)
         raise typer.Exit(code=1)

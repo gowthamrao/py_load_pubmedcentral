@@ -3,30 +3,25 @@ Data acquisition module for downloading and extracting PMC data.
 """
 from __future__ import annotations
 
-import tarfile
 import hashlib
 import csv
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import IO, Generator, List, Optional, Tuple
+from typing import Generator, List
 from urllib.parse import urljoin
 
 import requests
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
-from lxml import etree
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from py_load_pubmedcentral.models import (
     ArticleFileInfo,
-    PmcArticlesContent,
-    PmcArticlesMetadata,
 )
-from py_load_pubmedcentral.parser import parse_jats_xml
 
 
 class IncrementalUpdateInfo(BaseModel):

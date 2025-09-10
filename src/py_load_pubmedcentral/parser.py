@@ -3,7 +3,6 @@ JATS XML parser using lxml.iterparse for high performance and low memory usage.
 """
 from __future__ import annotations
 
-import io
 from datetime import datetime, timezone
 from typing import IO, Generator, Optional, Tuple
 
@@ -167,7 +166,7 @@ def parse_jats_xml(
 
             yield (metadata_model, content_model)
 
-        except Exception as e:
+        except Exception:
             # Using logger.error will also capture the traceback with exc_info=True
             logger.error("Error processing an article", exc_info=True)
             # The 'recover=True' in iterparse helps, but we add this for safety.

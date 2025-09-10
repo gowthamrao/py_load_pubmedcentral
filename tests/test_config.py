@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 
 def test_settings_load_from_env(monkeypatch):
     """
