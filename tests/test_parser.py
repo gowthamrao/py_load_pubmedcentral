@@ -127,7 +127,6 @@ def test_parser_is_a_generator():
     """
     Tests that the parser functions as a generator to keep memory usage low.
     """
-    test_date = datetime(2023, 3, 1, 12, 0, 0)
     with open(TEST_XML_PATH, "rb") as f:
         content = f.read()
     parser = parse_jats_xml(io.BytesIO(content))

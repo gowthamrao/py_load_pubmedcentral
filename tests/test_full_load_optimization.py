@@ -1,4 +1,3 @@
-import os
 import io
 from pathlib import Path
 import tarfile

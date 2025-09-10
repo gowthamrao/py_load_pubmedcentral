@@ -3,7 +3,6 @@ Database adapter interface and implementations for loading data.
 """
 from __future__ import annotations
 
-import io
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
