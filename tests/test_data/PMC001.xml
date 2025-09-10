@@ -1,0 +1,47 @@
+<article>
+  <front>
+    <journal-meta>
+      <journal-id>Test J</journal-id>
+      <journal-title-group>
+        <journal-title>Journal of Test Data</journal-title>
+      </journal-title-group>
+      <issn pub-type="epub">1234-5678</issn>
+      <publisher>
+        <publisher-name>Test Publisher</publisher-name>
+      </publisher>
+    </journal-meta>
+    <article-meta>
+      <article-id pub-id-type="pmc">PMC001</article-id>
+      <article-id pub-id-type="pmid">10001</article-id>
+      <article-id pub-id-type="doi">10.1000/test.1</article-id>
+      <title-group>
+        <article-title>The Science of Baseline Data</article-title>
+      </title-group>
+      <contrib-group>
+        <contrib contrib-type="author">
+          <name>
+            <surname>Smith</surname>
+            <given-names>John</given-names>
+          </name>
+          <aff>Data University</aff>
+        </contrib>
+      </contrib-group>
+      <pub-date pub-type="epub">
+        <day>01</day>
+        <month>01</month>
+        <year>2023</year>
+      </pub-date>
+      <abstract>
+        <p>This is the abstract for the first baseline article.</p>
+      </abstract>
+      <permissions>
+        <license license-type="cc-by">
+          <license-p>This is an open-access article distributed under the terms of the Creative Commons Attribution License.</license-p>
+        </license>
+      </permissions>
+    </article-meta>
+  </front>
+  <body>
+    <p>This is the full text of the first article (PMC001).</p>
+  </body>
+</article>

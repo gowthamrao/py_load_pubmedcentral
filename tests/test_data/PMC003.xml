@@ -1,0 +1,47 @@
+<article>
+  <front>
+    <journal-meta>
+      <journal-id>New J</journal-id>
+      <journal-title-group>
+        <journal-title>Journal of Delta Loads</journal-title>
+      </journal-title-group>
+      <issn pub-type="epub">9876-5432</issn>
+      <publisher>
+        <publisher-name>New Publisher</publisher-name>
+      </publisher>
+    </journal-meta>
+    <article-meta>
+      <article-id pub-id-type="pmc">PMC003</article-id>
+      <article-id pub-id-type="pmid">10003</article-id>
+      <article-id pub-id-type="doi">10.1000/test.3</article-id>
+      <title-group>
+        <article-title>A Brand New Article</article-title>
+      </title-group>
+      <contrib-group>
+        <contrib contrib-type="author">
+          <name>
+            <surname>Miller</surname>
+            <given-names>Mark</given-names>
+          </name>
+          <aff>Test Inc.</aff>
+        </contrib>
+      </contrib-group>
+      <pub-date pub-type="epub">
+        <day>15</day>
+        <month>06</month>
+        <year>2023</year>
+      </pub-date>
+      <abstract>
+        <p>This is a new article for the delta load.</p>
+      </abstract>
+      <permissions>
+        <license license-type="cc0">
+          <license-p>Public domain.</license-p>
+        </license>
+      </permissions>
+    </article-meta>
+  </front>
+  <body>
+    <p>This is the body of the new article (PMC003).</p>
+  </body>
+</article>
