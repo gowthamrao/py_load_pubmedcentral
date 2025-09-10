@@ -4,13 +4,17 @@ Utility functions for the application.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from rich.logging import RichHandler
 
 from py_load_pubmedcentral.config import settings
 
+if TYPE_CHECKING:
+    from py_load_pubmedcentral.db import PostgreSQLAdapter
 
-def get_db_adapter() -> "PostgreSQLAdapter":
+
+def get_db_adapter() -> PostgreSQLAdapter:
     """
     Creates a PostgreSQLAdapter instance from the application settings.
     """

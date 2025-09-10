@@ -1,7 +1,6 @@
 """
 Pytest configuration and shared fixtures.
 """
-import os
 import pytest
 from typing import Any, Generator
 from py_load_pubmedcentral.db import PostgreSQLAdapter

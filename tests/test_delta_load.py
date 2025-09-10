@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
 
+import pytest
 from typer.testing import CliRunner
 
 from py_load_pubmedcentral.acquisition import IncrementalUpdateInfo, S3DataSource
@@ -133,8 +134,6 @@ def _setup_initial_db_state(db_adapter: PostgreSQLAdapter, tmp_path: Path):
     db_adapter.bulk_load_native(str(meta_tsv_path), "pmc_articles_metadata")
     db_adapter.bulk_load_native(str(content_tsv_path), "pmc_articles_content")
 
-
-import pytest
 
 @pytest.mark.skip(reason="This test is flaky and fails intermittently in CI. Core logic is covered by test_pipeline_integration.py")
 def test_delta_load_pipeline(postgresql, mocker, tmp_path):
