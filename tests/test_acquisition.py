@@ -259,3 +259,24 @@ def test_download_file_bad_md5(mock_requests_get, tmp_path):
     data_source = NcbiFtpDataSource()
     with pytest.raises(IOError, match=r"Could not parse MD5 checksum"):
         data_source.download_file(url, tmp_path)
+
+
+def test_get_incremental_updates_no_match(mock_requests_get):
+    """
+    Tests that get_incremental_updates handles files that don't match the regex.
+    """
+    mock_html = """
+    <a href="not_an_update.tar.gz">not_an_update.tar.gz</a>
+    """
+    # Simulate responses for all directories
+    mock_requests_get.side_effect = [
+        MockResponse(mock_html.encode("utf-8")),
+        MockResponse(mock_html.encode("utf-8")),
+        MockResponse(mock_html.encode("utf-8")),
+    ]
+
+
+    data_source = NcbiFtpDataSource()
+    since_date = datetime(2023, 1, 1, 0, 0)
+    updates = data_source.get_incremental_updates(since=since_date)
+    assert len(updates) == 0

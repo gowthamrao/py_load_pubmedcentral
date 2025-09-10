@@ -62,10 +62,16 @@ def test_full_load_end_to_end(test_db_adapter: PostgreSQLAdapter, mocker):
         return_value=mock_article_list,
     )
 
-    # Mock the download function to simply return the path to our local test archive
+    def mock_download_file(file_key: str, destination_path: Path) -> Path:
+        import shutil
+        source_file = TEST_ARCHIVE_PATH
+        dest_file = destination_path / Path(file_key).name
+        shutil.copy(source_file, dest_file)
+        return dest_file
+
     mocker.patch(
-        "py_load_pubmedcentral.cli._download_archive_worker",
-        return_value=TEST_ARCHIVE_PATH,
+        "py_load_pubmedcentral.acquisition.S3DataSource.download_file",
+        side_effect=mock_download_file,
     )
 
     # --- 3. Execution: Run the CLI command ---

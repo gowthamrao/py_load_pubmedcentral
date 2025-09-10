@@ -158,3 +158,47 @@ def test_delta_load_success(
     mock_db_instance.handle_deletions.assert_any_call(["PMC123"])
     mock_db_instance.handle_deletions.assert_any_call(["PMC456"])
     mock_db_instance.bulk_upsert_and_update_state.assert_called_once()
+
+
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
+@patch("py_load_pubmedcentral.cli.S3DataSource")
+def test_delta_load_no_new_updates(MockS3DataSource, mock_get_adapter):
+    """
+    Tests that delta-load exits gracefully when no new updates are found.
+    """
+    # --- Setup ---
+    # Mock the data source to return no new updates
+    mock_source_instance = MockS3DataSource.return_value
+    mock_db_instance = mock_get_adapter.return_value
+    last_run_time = datetime(2023, 1, 1, 0, 0, tzinfo=timezone.utc)
+    mock_db_instance.get_last_successful_run_info.return_value = (last_run_time, "file0.xml")
+    mock_source_instance.get_incremental_updates.return_value = []
+    mock_source_instance.get_retracted_pmcids.return_value = []
+
+    # --- Execution ---
+    runner = CliRunner()
+    result = runner.invoke(app, ["delta-load", "--source", "s3"], catch_exceptions=False)
+
+    # --- Verification ---
+    assert result.exit_code == 0
+    assert "No new incremental updates found." in result.stdout
+
+
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
+@patch("py_load_pubmedcentral.cli.S3DataSource")
+def test_delta_load_no_last_run(MockS3DataSource, mock_get_adapter):
+    """
+    Tests that delta-load exits with an error if no successful full load was ever run.
+    """
+    mock_db_instance = mock_get_adapter.return_value
+    # Mock the case where there's no successful 'DELTA' run
+    mock_db_instance.get_last_successful_run_info.side_effect = [
+        None, # First call for 'DELTA'
+        None  # Second call for 'FULL'
+    ]
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["delta-load", "--source", "s3"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "No successful 'FULL' load found." in result.stdout
