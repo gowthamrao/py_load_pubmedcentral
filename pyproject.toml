@@ -1,5 +1,5 @@
 [project]
-name = "py-load-pubmedcentral"
+name = "py_load_pubmedcentral"
 version = "1.0.0"
 description = "A high-throughput, scalable, and reliable pipeline for synchronizing PubMed Central."
 authors = [
@@ -28,18 +28,19 @@ dependencies = [
     "pydantic",
     "pydantic-settings",
     "boto3",
-    "tenacity"
+    "tenacity",
 ]
 
-[tool.poetry.group.dev.dependencies]
-pytest = "*"
-ruff = "*"
-mypy = "*"
-black = "*"
-pytest-postgresql = "*"
-psycopg = {extras = ["binary"], version = "*"}
-pytest-mock = "*"
-pytest-dependency = "*"
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "black",
+    "pytest-postgresql<5.0",
+    "pytest-mock",
+    "pytest-dependency",
+]
 
 [project.scripts]
 pmc-sync = "py_load_pubmedcentral.cli:app"
@@ -48,5 +49,9 @@ pmc-sync = "py_load_pubmedcentral.cli:app"
 packages = [{include = "py_load_pubmedcentral", from = "src"}]
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
+requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+postgresql_load = []
