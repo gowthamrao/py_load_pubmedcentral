@@ -52,6 +52,8 @@ def test_db_adapter(postgresql_proc: Any) -> Generator[PostgreSQLAdapter, None, 
     janitor.drop()
 
 
+from pathlib import Path
+
 def pytest_configure(config):
     """
     Register a custom marker for integration tests.
@@ -59,3 +61,28 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "integration: mark a test as an integration test"
     )
+
+
+SCHEMA_PATH = Path(__file__).parent.parent / "schemas" / "pmc_schema.sql"
+
+
+@pytest.fixture(scope="function")
+def db_with_schema(test_db_adapter: PostgreSQLAdapter):
+    """
+    Fixture to provide a database adapter with a clean, pre-loaded schema
+    for each test function.
+    """
+    # Drop and recreate the public schema to ensure a clean slate for each test
+    with test_db_adapter.conn.cursor() as cursor:
+        cursor.execute("DROP SCHEMA public CASCADE;")
+        cursor.execute("CREATE SCHEMA public;")
+    test_db_adapter.conn.commit()
+
+    # Load the schema
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+        sql_script = f.read()
+    test_db_adapter.execute_sql(sql_script)
+
+    yield test_db_adapter
+    # Teardown is handled by the session-level fixture (test_db_adapter),
+    # which drops the entire test database.
