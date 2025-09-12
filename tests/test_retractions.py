@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import tarfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -75,9 +75,9 @@ def test_retraction_pipeline(mock_s3_data_source, db_adapter, test_files):
         # 2. Mock DataSource for both full and delta loads
         mock_instance = mock_s3_data_source.return_value
 
-        full_load_timestamp = datetime.utcnow()
+        full_load_timestamp = datetime.now(timezone.utc)
         time.sleep(1) # Ensure timestamps are distinct
-        delta_load_timestamp = datetime.utcnow()
+        delta_load_timestamp = datetime.now(timezone.utc)
 
         # Define article lists for the two runs
         initial_articles = [
