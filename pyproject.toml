@@ -32,23 +32,21 @@ dependencies = [
     "tenacity",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest",
-    "ruff",
-    "mypy",
-    "black",
-    "pytest-postgresql<4.0",
-    "pytest-mock",
-    "pytest-dependency",
-    "pytest-cov",
-]
-
 [project.scripts]
 pmc-sync = "py_load_pubmedcentral.cli:app"
 
 [tool.poetry]
 packages = [{include = "py_load_pubmedcentral", from = "src"}]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+ruff = "*"
+mypy = "*"
+black = "*"
+pytest-postgresql = "<4.0"
+pytest-mock = "*"
+pytest-dependency = "*"
+pytest-cov = "*"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
