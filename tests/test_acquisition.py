@@ -166,3 +166,117 @@ def test_download_file_retry_logic(mock_requests_get, tmp_path):
     assert mock_requests_get.call_count == 4
     assert destination_path.exists()
     assert destination_path.read_bytes() == file_content
+
+
+def test_get_incremental_updates(mock_requests_get):
+    """
+    Tests finding incremental update packages from a mock FTP directory listing.
+    """
+    # Note: The real FTP server has multiple directories. This mock simulates
+    # the responses from iterating through them.
+    mock_html_comm = """
+    <a href="comm_use.incr.2023-01-03.tar.gz">comm_use.incr.2023-01-03.tar.gz</a>
+    <a href="comm_use.incr.2022-12-31.tar.gz">non_comm_use.incr.2022-12-31.tar.gz</a>
+    """
+    mock_html_noncomm = """
+    <a href="noncomm.incr.2023-01-04.tar.gz">noncomm.incr.2023-01-04.tar.gz</a>
+    """
+    mock_html_other = """
+    <a href="other.incr.2023-01-02.tar.gz">other.incr.2023-01-02.tar.gz</a>
+    """
+    mock_requests_get.side_effect = [
+        MockResponse(mock_html_comm.encode("utf-8")),
+        MockResponse(mock_html_noncomm.encode("utf-8")),
+        MockResponse(mock_html_other.encode("utf-8")),
+    ]
+
+    data_source = NcbiFtpDataSource()
+    # We are looking for updates since 2023-01-01
+    since_date = datetime(2023, 1, 1, 0, 0)
+    updates = data_source.get_incremental_updates(since=since_date)
+
+    assert len(updates) == 3
+    # The updates should be sorted by date
+    assert "other.incr.2023-01-02" in updates[0].archive_path
+    assert "comm_use.incr.2023-01-03" in updates[1].archive_path
+    assert "noncomm.incr.2023-01-04" in updates[2].archive_path
+
+
+def test_get_incremental_updates_request_error(mock_requests_get):
+    """
+    Tests that get_incremental_updates handles request exceptions gracefully.
+    """
+    mock_requests_get.side_effect = requests.exceptions.RequestException("Connection error")
+    data_source = NcbiFtpDataSource()
+    since_date = datetime(2023, 1, 1, 0, 0)
+    updates = data_source.get_incremental_updates(since=since_date)
+    assert len(updates) == 0
+
+
+def test_get_retracted_pmcids_request_error(mock_requests_get):
+    """
+    Tests that get_retracted_pmcids returns an empty list on request failure.
+    """
+    mock_requests_get.side_effect = requests.exceptions.RequestException("Connection error")
+    data_source = NcbiFtpDataSource()
+    retracted_list = data_source.get_retracted_pmcids()
+    assert retracted_list == []
+
+
+def test_download_file_no_md5(mock_requests_get, tmp_path):
+    """
+    Tests that download proceeds without verification if MD5 file is not found (404).
+    """
+    file_content = b"This is a test file."
+    url = "https://fake.host/test_file.tar.gz"
+
+    mock_requests_get.side_effect = [
+        MockResponse(file_content),
+        MockResponse(b"Not Found", status_code=404)
+    ]
+
+    data_source = NcbiFtpDataSource()
+    destination_path = data_source.download_file(url, tmp_path)
+
+    assert destination_path.exists()
+    assert destination_path.read_bytes() == file_content
+    assert mock_requests_get.call_count == 2
+
+
+def test_download_file_bad_md5(mock_requests_get, tmp_path):
+    """
+    Tests that an IOError is raised if the MD5 file is malformed.
+    """
+    file_content = b"This is a test file."
+    md5_content = "This is not a valid MD5 file."
+    url = "https://fake.host/test_file.tar.gz"
+
+    mock_requests_get.side_effect = [
+        MockResponse(file_content),
+        MockResponse(md5_content.encode("utf-8"))
+    ]
+
+    data_source = NcbiFtpDataSource()
+    with pytest.raises(IOError, match=r"Could not parse MD5 checksum"):
+        data_source.download_file(url, tmp_path)
+
+
+def test_get_incremental_updates_no_match(mock_requests_get):
+    """
+    Tests that get_incremental_updates handles files that don't match the regex.
+    """
+    mock_html = """
+    <a href="not_an_update.tar.gz">not_an_update.tar.gz</a>
+    """
+    # Simulate responses for all directories
+    mock_requests_get.side_effect = [
+        MockResponse(mock_html.encode("utf-8")),
+        MockResponse(mock_html.encode("utf-8")),
+        MockResponse(mock_html.encode("utf-8")),
+    ]
+
+
+    data_source = NcbiFtpDataSource()
+    since_date = datetime(2023, 1, 1, 0, 0)
+    updates = data_source.get_incremental_updates(since=since_date)
+    assert len(updates) == 0

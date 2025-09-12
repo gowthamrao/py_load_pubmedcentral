@@ -99,7 +99,7 @@ def _download_archive_worker(
 
 
 def _parse_archive_worker(
-    verified_path: Path,
+    verified_path: Path | str,
     article_info_lookup: dict[str, ArticleFileInfo],
     tmp_path: Path,
 ) -> tuple[Path, Path, int] | None:
@@ -107,6 +107,7 @@ def _parse_archive_worker(
     Helper function to parse a single archive in a process pool.
     This is now decoupled from the database adapter's implementation details.
     """
+    verified_path = Path(verified_path)
     adapter = get_db_adapter()
     # Use UUID to ensure TSV filenames are unique across processes
     run_uuid = uuid.uuid4()
@@ -115,7 +116,7 @@ def _parse_archive_worker(
 
     try:
         article_generator = stream_and_parse_tar_gz_archive(
-            verified_path,
+            str(verified_path),
             article_info_lookup,
         )
         # Buffer articles from this archive in memory. This is a trade-off
@@ -288,7 +289,7 @@ def full_load(
 
 
 def _parse_delta_archive_worker(
-    verified_path: Path,
+    verified_path: Path | str,
     update_info: IncrementalUpdateInfo,
     source_name: DataSourceName,
     tmp_path: Path,
@@ -298,6 +299,8 @@ def _parse_delta_archive_worker(
     This handles getting the file list and parsing. It returns the list of
     retracted PMCIDs instead of processing them directly.
     """
+    verified_path = Path(verified_path)
+
     # Each process needs its own instances
     adapter = get_db_adapter()
     data_source: DataSource = S3DataSource() if source_name == "s3" else NcbiFtpDataSource()
@@ -329,7 +332,7 @@ def _parse_delta_archive_worker(
 
         # 3. Parse the archive and write to TSV.
         article_info_lookup = {info.pmcid: info for info in articles_to_process}
-        article_generator = stream_and_parse_tar_gz_archive(verified_path, article_info_lookup)
+        article_generator = stream_and_parse_tar_gz_archive(str(verified_path), article_info_lookup)
 
         # Buffer articles from this archive in memory to decouple parsing from writing.
         buffered_articles = list(article_generator)

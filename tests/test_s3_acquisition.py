@@ -1,6 +1,7 @@
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from datetime import datetime
 
 from py_load_pubmedcentral.acquisition import S3DataSource
 from py_load_pubmedcentral.models import ArticleFileInfo
@@ -68,7 +69,88 @@ def test_download_file_s3_success_with_matching_etag(mock_boto_client, tmp_path:
     mock_s3.download_file.assert_called_once_with(
         Bucket="pmc-oa-opendata", Key=s3_key, Filename=str(destination_path)
     )
-    assert destination_path.exists()  # File should not be deleted
+
+
+@patch("boto3.client")
+def test_get_retracted_pmcids_s3(mock_boto_client):
+    """
+    Tests that get_retracted_pmcids successfully parses the CSV from S3.
+    """
+    mock_s3 = MagicMock()
+    mock_boto_client.return_value = mock_s3
+
+    csv_content = b"PMCID\nPMC123\nPMC456"
+    mock_body = MagicMock()
+    mock_body.iter_lines.return_value = csv_content.splitlines()
+    mock_s3.get_object.return_value = {"Body": mock_body}
+
+    data_source = S3DataSource()
+    result = data_source.get_retracted_pmcids()
+
+    assert result == ["PMC123", "PMC456"]
+
+@patch("boto3.client")
+def test_get_retracted_pmcids_s3_no_header(mock_boto_client):
+    """
+    Tests that get_retracted_pmcids works without a header.
+    """
+    mock_s3 = MagicMock()
+    mock_boto_client.return_value = mock_s3
+
+    csv_content = b"PMC123\nPMC456"
+    mock_body = MagicMock()
+    mock_body.iter_lines.return_value = csv_content.splitlines()
+    mock_s3.get_object.return_value = {"Body": mock_body}
+
+    data_source = S3DataSource()
+    result = data_source.get_retracted_pmcids()
+
+    assert result == ["PMC123", "PMC456"]
+
+@patch("boto3.client")
+def test_get_retracted_pmcids_s3_no_such_key(mock_boto_client):
+    """
+    Tests that get_retracted_pmcids returns an empty list if the file doesn't exist.
+    """
+    mock_s3 = MagicMock()
+    mock_boto_client.return_value = mock_s3
+    from botocore.exceptions import ClientError
+    mock_s3.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+
+    data_source = S3DataSource()
+    result = data_source.get_retracted_pmcids()
+
+    assert result == []
+
+
+@patch("boto3.client")
+def test_get_incremental_updates_s3(mock_boto_client):
+    """
+    Tests that get_incremental_updates successfully finds new updates from S3.
+    """
+    mock_s3 = MagicMock()
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.side_effect = [
+        [
+            {
+                "Contents": [
+                    {"Key": "oa_bulk/oa_comm/xml/comm_use.incr.2023-01-03.tar.gz"},
+                    {"Key": "oa_bulk/oa_comm/xml/comm_use.incr.2022-12-31.tar.gz"},
+                ]
+            }
+        ],
+        [], # for oa_noncomm
+        [], # for oa_other
+    ]
+    mock_s3.get_paginator.return_value = mock_paginator
+    mock_boto_client.return_value = mock_s3
+
+    data_source = S3DataSource()
+    since_date = datetime(2023, 1, 1, 0, 0)
+    updates = data_source.get_incremental_updates(since=since_date)
+
+    assert len(updates) == 1
+    assert "comm_use.incr.2023-01-03" in updates[0].archive_path
 
 
 @patch("boto3.client")

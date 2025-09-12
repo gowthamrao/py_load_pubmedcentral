@@ -181,14 +181,14 @@ def parse_jats_xml(
 
 
 def stream_and_parse_tar_gz_archive(
-    tar_gz_path: Path,
+    tar_gz_path: str,
     article_info_lookup: dict[str, ArticleFileInfo],
 ) -> Generator[Tuple[PmcArticlesMetadata, PmcArticlesContent], None, None]:
     """
     Opens a local .tar.gz archive, finds XML files for target articles,
     parses them, and yields data models.
     """
-    with tarfile.open(name=tar_gz_path, mode="r|gz") as tar:
+    with tarfile.open(name=tar_gz_path, mode="r:gz") as tar:
         for member in tar:
             if member.isfile() and member.name.lower().endswith((".xml", ".nxml")):
                 xml_file_obj = tar.extractfile(member)
