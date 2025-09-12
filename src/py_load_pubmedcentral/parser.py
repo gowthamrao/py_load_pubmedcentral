@@ -124,11 +124,14 @@ def parse_jats_xml(
                     pub_date = datetime.strptime(f"{year}-{month}-{day}", "%Y-%m-%d").date()
 
             # Journal Info
-            journal_info = JournalInfo(
-                name=_get_text(journal_meta, "journal-title-group/journal-title") or "N/A",
-                issn=_get_text(journal_meta, "issn"),
-                publisher=_get_text(journal_meta, "publisher/publisher-name"),
-            )
+            if journal_meta is not None:
+                journal_info = JournalInfo(
+                    name=_get_text(journal_meta, "journal-title-group/journal-title") or "N/A",
+                    issn=_get_text(journal_meta, "issn"),
+                    publisher=_get_text(journal_meta, "publisher/publisher-name"),
+                )
+            else:
+                journal_info = JournalInfo(name="N/A", issn=None, publisher=None)
 
             # License Info
             license_info = None
