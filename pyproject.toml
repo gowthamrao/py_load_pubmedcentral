@@ -38,9 +38,10 @@ dev = [
     "ruff",
     "mypy",
     "black",
-    "pytest-postgresql<5.0",
+    "pytest-postgresql<4.0",
     "pytest-mock",
     "pytest-dependency",
+    "pytest-cov",
 ]
 
 [project.scripts]
