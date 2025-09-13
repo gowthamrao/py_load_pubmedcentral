@@ -31,6 +31,28 @@ def test_initialize_file_not_found():
 
 
 @patch("py_load_pubmedcentral.cli.get_db_adapter")
+def test_initialize_success(mock_get_adapter):
+    """
+    Tests the happy path for the initialize command.
+    """
+    # Mock the adapter to prevent any actual DB calls
+    mock_adapter_instance = mock_get_adapter.return_value
+
+    runner = CliRunner()
+    # Create a dummy schema file
+    schema_content = "CREATE TABLE articles (id INT);"
+    with open("dummy_schema.sql", "w") as f:
+        f.write(schema_content)
+
+    result = runner.invoke(app, ["initialize", "--schema", "dummy_schema.sql"])
+
+    assert result.exit_code == 0
+    assert "Database schema initialized successfully" in result.stdout
+    # Verify that the adapter's execute_sql method was called with the schema content
+    mock_adapter_instance.execute_sql.assert_called_once_with(schema_content)
+
+
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
 def test_initialize_db_error(mock_get_adapter):
     """
     Tests that the initialize command handles generic exceptions during DB connection.
@@ -202,3 +224,113 @@ def test_delta_load_no_last_run(MockS3DataSource, mock_get_adapter):
 
     assert result.exit_code == 1
     assert "No successful 'FULL' load found." in result.stdout
+
+
+@patch("py_load_pubmedcentral.cli.S3DataSource")
+def test_download_archive_worker_exception(MockS3DataSource, tmp_path):
+    """
+    Tests that the _download_archive_worker handles exceptions gracefully.
+    """
+    from py_load_pubmedcentral.cli import _download_archive_worker, DataSourceName
+
+    # Mock the data source to raise an exception
+    mock_source_instance = MockS3DataSource.return_value
+    mock_source_instance.download_file.side_effect = Exception("Download failed")
+
+    result = _download_archive_worker("some_file", DataSourceName.s3, tmp_path)
+
+    assert result is None
+
+
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
+@patch("py_load_pubmedcentral.cli.stream_and_parse_tar_gz_archive")
+def test_parse_archive_worker_exception(mock_stream_and_parse, mock_get_adapter, tmp_path):
+    """
+    Tests that the _parse_archive_worker handles exceptions gracefully.
+    """
+    from py_load_pubmedcentral.cli import _parse_archive_worker
+
+    # Mock the stream_and_parse_tar_gz_archive function to raise an exception
+    mock_stream_and_parse.side_effect = Exception("Parsing failed")
+
+    # Create a dummy file to parse
+    dummy_file = tmp_path / "dummy.tar.gz"
+    dummy_file.touch()
+
+    result = _parse_archive_worker(dummy_file, {}, tmp_path)
+
+    assert result is None
+
+
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
+@patch("py_load_pubmedcentral.cli.S3DataSource")
+def test_parse_delta_archive_worker_exception(MockS3DataSource, mock_get_adapter, tmp_path):
+    """
+    Tests that the _parse_delta_archive_worker handles exceptions gracefully.
+    """
+    from py_load_pubmedcentral.cli import _parse_delta_archive_worker, DataSourceName
+    from py_load_pubmedcentral.acquisition import IncrementalUpdateInfo
+    from datetime import datetime, timezone
+
+    # Mock the data source to raise an exception
+    mock_source_instance = MockS3DataSource.return_value
+    mock_source_instance.stream_article_infos_from_file_list.side_effect = Exception("Parsing failed")
+
+    # Create a dummy file to parse
+    dummy_file = tmp_path / "dummy.tar.gz"
+    dummy_file.touch()
+
+    update_info = IncrementalUpdateInfo(
+        archive_path="update1.tar.gz",
+        file_list_path="update1.filelist.csv",
+        date=datetime(2023, 1, 2, 0, 0, tzinfo=timezone.utc),
+    )
+
+    result = _parse_delta_archive_worker(dummy_file, update_info, DataSourceName.s3, tmp_path)
+
+    assert result is None
+
+
+@patch("py_load_pubmedcentral.cli.settings")
+def test_get_staging_directory_with_setting(mock_settings, tmp_path):
+    """
+    Tests that the _get_staging_directory function uses the staging_dir from settings.
+    """
+    from py_load_pubmedcentral.cli import _get_staging_directory
+
+    # Set the staging_dir in the mock settings
+    staging_dir = tmp_path / "staging"
+    mock_settings.staging_dir = staging_dir
+
+    with _get_staging_directory() as path:
+        assert path == staging_dir
+        assert path.exists()
+
+
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
+@patch("py_load_pubmedcentral.cli.S3DataSource")
+def test_delta_load_last_file_not_found(MockS3DataSource, mock_get_adapter):
+    """
+    Tests that delta-load continues gracefully if the last processed file is not found.
+    """
+    # --- Setup ---
+    mock_source_instance = MockS3DataSource.return_value
+    mock_db_instance = mock_get_adapter.return_value
+    last_run_time = datetime(2023, 1, 1, 0, 0, tzinfo=timezone.utc)
+    mock_db_instance.get_last_successful_run_info.return_value = (last_run_time, "non_existent_file.xml")
+    update1_date = datetime(2023, 1, 2, 0, 0, tzinfo=timezone.utc)
+    update1 = IncrementalUpdateInfo(
+        archive_path="update1.tar.gz",
+        file_list_path="update1.filelist.csv",
+        date=update1_date,
+    )
+    mock_source_instance.get_incremental_updates.return_value = [update1]
+    mock_source_instance.get_retracted_pmcids.return_value = []
+
+    # --- Execution ---
+    runner = CliRunner()
+    result = runner.invoke(app, ["delta-load", "--source", "s3"], catch_exceptions=False)
+
+    # --- Verification ---
+    assert result.exit_code == 1
+    assert "A critical error occurred during delta-load" in result.stdout
