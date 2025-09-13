@@ -1,0 +1,4 @@
+This is not valid XML at all.
+<article> this tag is never closed.
+<random>
+I expect this to fail parsing entirely.
