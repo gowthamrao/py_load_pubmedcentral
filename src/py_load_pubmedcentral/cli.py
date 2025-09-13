@@ -43,7 +43,6 @@ def initialize(
         "--schema",
         "-s",
         help="Path to the SQL file containing the database schema.",
-        exists=True,
         dir_okay=False,
     )
 ):
