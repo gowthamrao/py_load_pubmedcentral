@@ -197,6 +197,114 @@ def test_bulk_load_native(db_with_schema: PostgreSQLAdapter):
             assert count == 2
 
 
+def test_bulk_upsert_articles_delta_load(db_with_schema: PostgreSQLAdapter):
+    """Tests the bulk_upsert_articles function with is_full_load=False (delta load)."""
+    # 1. Insert initial data
+    initial_models = _get_test_models()
+    initial_metadata = [m[0] for m in initial_models]
+    initial_content = [m[1] for m in initial_models]
+    # Set initial dates to test the update logic
+    initial_metadata[0].source_last_updated = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    initial_metadata[1].source_last_updated = datetime(2022, 1, 1, tzinfo=timezone.utc)
+    initial_metadata[1].title = "Original Title"
+
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        # Write initial data to files
+        metadata_path = tmp_path / "metadata.tsv"
+        content_path = tmp_path / "content.tsv"
+        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+        content_columns = list(PmcArticlesContent.model_fields.keys())
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(initial_metadata, metadata_columns, f)
+        with open(content_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(initial_content, content_columns, f)
+
+        # Insert initial data using full load path for simplicity
+        db_with_schema.bulk_upsert_articles(str(metadata_path), str(content_path), is_full_load=True)
+
+    # 2. Prepare delta data (one new article, one updated article, one old article)
+    delta_models = _get_test_models()
+    # Update the first article (PMC12345) with a newer date
+    delta_models[0][0].title = "A Newly Updated Title"
+    delta_models[0][0].source_last_updated = datetime(2023, 1, 1, tzinfo=timezone.utc)
+    # The second article (PMC67890) has an older date, so it should NOT be updated.
+    delta_models[1][0].title = "An Old Title That Should Not Be Used"
+    delta_models[1][0].source_last_updated = datetime(2021, 1, 1, tzinfo=timezone.utc)
+    # Add a new article
+    from py_load_pubmedcentral.models import Contributor, JournalInfo
+    new_metadata = PmcArticlesMetadata(
+        pmcid="PMCNEW",
+        title="A Brand New Article",
+        source_last_updated=datetime.now(timezone.utc),
+        journal_info=JournalInfo(name="Test Journal"),
+        contributors=[Contributor(name="Test Author")],
+        is_retracted=False,
+        sync_timestamp=datetime.now(timezone.utc)
+    )
+    new_content = PmcArticlesContent(pmcid="PMCNEW", raw_jats_xml="<article/>", body_text="New body")
+    delta_models.append((new_metadata, new_content))
+
+
+    delta_metadata = [m[0] for m in delta_models]
+    delta_content = [m[1] for m in delta_models]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        metadata_path = tmp_path / "delta_metadata.tsv"
+        content_path = tmp_path / "delta_content.tsv"
+        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+        content_columns = list(PmcArticlesContent.model_fields.keys())
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(delta_metadata, metadata_columns, f)
+        with open(content_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(delta_content, content_columns, f)
+
+        # 3. Perform the delta upsert
+        db_with_schema.bulk_upsert_articles(str(metadata_path), str(content_path), is_full_load=False)
+
+
+    # 4. Assertions
+    with db_with_schema.conn.cursor() as cursor:
+        # Check total count (should be 3: 2 initial + 1 new)
+        cursor.execute("SELECT COUNT(*) FROM pmc_articles_metadata;")
+        count = cursor.fetchone()[0]
+        assert count == 3
+
+        # Check that the first article was updated
+        cursor.execute("SELECT title FROM pmc_articles_metadata WHERE pmcid = 'PMC12345';")
+        title = cursor.fetchone()[0]
+        assert title == "A Newly Updated Title"
+
+        # Check that the second article was NOT updated
+        cursor.execute("SELECT title FROM pmc_articles_metadata WHERE pmcid = 'PMC67890';")
+        title = cursor.fetchone()[0]
+        assert title == "Original Title"
+
+        # Check that the new article was inserted
+        cursor.execute("SELECT COUNT(*) FROM pmc_articles_metadata WHERE pmcid = 'PMCNEW';")
+        count = cursor.fetchone()[0]
+        assert count == 1
+
+
+def test_implicit_connect_and_close(db_with_schema: PostgreSQLAdapter):
+    """Tests that a connection is implicitly made and can be closed."""
+    # Create a new adapter with the same params, but don't connect it.
+    params = db_with_schema.connection_params
+    adapter = PostgreSQLAdapter(connection_params=params)
+    assert adapter.conn is None
+
+    # This should trigger an implicit connect()
+    run_id = adapter.start_run("TEST")
+    assert adapter.conn is not None
+    assert not adapter.conn.closed
+
+    # Now close it
+    adapter.close()
+    assert adapter.conn is None
+
+
 def test_bulk_upsert_and_update_state(db_with_schema: PostgreSQLAdapter):
     """Tests the bulk_upsert_and_update_state function."""
     all_models = _get_test_models()

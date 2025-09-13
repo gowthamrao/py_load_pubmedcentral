@@ -23,11 +23,8 @@ def test_initialize_file_not_found():
     """
     runner = CliRunner()
     result = runner.invoke(app, ["initialize", "--schema", "non_existent_file.sql"])
-    # Typer exits with 2 for CLI argument validation errors
-    assert result.exit_code == 2
-    # Typer's validation error messages are sent to stderr.
-    assert "Invalid value" in result.stderr
-    assert "does not exist" in result.stderr
+    assert result.exit_code == 1
+    assert "Error: Schema file not found" in result.stdout
 
 
 @patch("py_load_pubmedcentral.cli.get_db_adapter")
@@ -96,6 +93,169 @@ def test_full_load_no_articles_found(mock_get_list, mock_get_adapter):
     # Verify that the run was started and ended correctly
     mock_db_instance.start_run.assert_called_once_with(run_type="FULL")
     mock_db_instance.end_run.assert_called_once()
+
+
+@patch("py_load_pubmedcentral.cli.logger")
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
+@patch("py_load_pubmedcentral.cli._download_archive_worker")
+@patch("py_load_pubmedcentral.cli._parse_archive_worker")
+@patch("py_load_pubmedcentral.cli.S3DataSource")
+def test_full_load_success(
+    MockS3DataSource,
+    mock_parse_worker,
+    mock_download_worker,
+    mock_get_adapter,
+    mock_logger,
+    tmp_path,
+):
+    """
+    Tests the happy path for the full-load command.
+    """
+    runner = CliRunner()
+
+    # --- Setup Mocks ---
+    mock_source_instance = MockS3DataSource.return_value
+    mock_db_instance = mock_get_adapter.return_value
+    mock_db_instance.start_run.return_value = 1
+
+    # Mock get_article_file_list to return some articles
+    from py_load_pubmedcentral.models import ArticleFileInfo
+    article_info = ArticleFileInfo(file_path="archive1.tar.gz", pmcid="PMC1")
+    mock_source_instance.get_article_file_list.return_value = [article_info]
+
+    # Mock the worker functions
+    mock_downloaded_archive = tmp_path / "fake_archive.tar.gz"
+    mock_downloaded_archive.touch()
+    mock_download_worker.return_value = mock_downloaded_archive
+
+    mock_meta_path = tmp_path / "meta.tsv"
+    mock_content_path = tmp_path / "content.tsv"
+    mock_meta_path.touch()
+    mock_content_path.touch()
+    mock_parse_worker.return_value = (mock_meta_path, mock_content_path, 1)
+
+    # --- Execute Command ---
+    result = runner.invoke(
+        app,
+        ["full-load", "--source", "s3", "--parsing-workers", "1"],
+        catch_exceptions=False,
+    )
+
+    # --- Assertions ---
+    assert result.exit_code == 0
+
+    # Check logger calls
+    log_calls = " ".join([call.args[0] for call in mock_logger.info.call_args_list])
+
+    assert "--- Starting Full Baseline Load from source: s3 ---" in log_calls
+    assert "Discovered 1 unique archives to process." in log_calls
+    assert "Successfully downloaded 1 archives." in log_calls
+    assert "Successfully parsed 1 archives, yielding 1 records." in log_calls
+    assert "Loading data from 1 batches into the database..." in log_calls
+    assert "Database loading complete." in log_calls
+
+    mock_db_instance.bulk_insert_from_files_for_full_load.assert_called_once()
+
+
+from unittest.mock import patch, ANY
+
+
+from unittest.mock import patch, ANY
+
+@patch("py_load_pubmedcentral.cli.logger")
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
+@patch("py_load_pubmedcentral.cli._get_staging_directory")
+@patch("py_load_pubmedcentral.cli.S3DataSource")
+def test_full_load_staging_dir_exception(
+    MockS3DataSource,
+    mock_get_staging_directory,
+    mock_get_adapter,
+    mock_logger,
+):
+    """
+    Tests that full-load handles an exception during staging directory creation.
+    """
+    runner = CliRunner()
+
+    # --- Setup Mocks ---
+    mock_source_instance = MockS3DataSource.return_value
+    mock_db_instance = mock_get_adapter.return_value
+    mock_db_instance.start_run.return_value = 1
+
+    from py_load_pubmedcentral.models import ArticleFileInfo
+    article_info = ArticleFileInfo(file_path="archive1.tar.gz", pmcid="PMC1")
+    mock_source_instance.get_article_file_list.return_value = [article_info]
+
+    # Mock the staging directory context manager to raise an exception
+    mock_get_staging_directory.side_effect = Exception("Cannot create temp dir")
+
+    # --- Execute Command ---
+    result = runner.invoke(
+        app,
+        ["full-load", "--source", "s3"],
+        catch_exceptions=False,
+    )
+
+    # --- Assertions ---
+    assert result.exit_code == 0 # The CLI should exit gracefully
+
+    # Check logger calls
+    mock_logger.critical.assert_called_once()
+    assert "A critical error occurred during full_load" in mock_logger.critical.call_args[0][0]
+
+    # Check that end_run was called with FAILED status
+    mock_db_instance.end_run.assert_called_once()
+    assert mock_db_instance.end_run.call_args.args[1] == "FAILED"
+
+
+@patch("py_load_pubmedcentral.cli.logger")
+@patch("py_load_pubmedcentral.cli.get_db_adapter")
+@patch("py_load_pubmedcentral.cli._download_archive_worker")
+@patch("py_load_pubmedcentral.cli._parse_archive_worker")
+@patch("py_load_pubmedcentral.cli.S3DataSource")
+def test_full_load_no_records_parsed(
+    MockS3DataSource,
+    mock_parse_worker,
+    mock_download_worker,
+    mock_get_adapter,
+    mock_logger,
+    tmp_path,
+):
+    """
+    Tests that full-load handles the case where no records are parsed.
+    """
+    runner = CliRunner()
+
+    # --- Setup Mocks ---
+    mock_source_instance = MockS3DataSource.return_value
+    mock_db_instance = mock_get_adapter.return_value
+    mock_db_instance.start_run.return_value = 1
+
+    from py_load_pubmedcentral.models import ArticleFileInfo
+    article_info = ArticleFileInfo(file_path="archive1.tar.gz", pmcid="PMC1")
+    mock_source_instance.get_article_file_list.return_value = [article_info]
+
+    mock_downloaded_archive = tmp_path / "fake_archive.tar.gz"
+    mock_downloaded_archive.touch()
+    mock_download_worker.return_value = mock_downloaded_archive
+
+    # Mock the parse worker to return None
+    mock_parse_worker.return_value = None
+
+    # --- Execute Command ---
+    result = runner.invoke(
+        app,
+        ["full-load", "--source", "s3", "--parsing-workers", "1"],
+        catch_exceptions=False,
+    )
+
+    # --- Assertions ---
+    assert result.exit_code == 0
+
+    log_calls = " ".join([call.args[0] for call in mock_logger.info.call_args_list])
+    assert "No new records were parsed, skipping database load." in log_calls
+
+    mock_db_instance.bulk_insert_from_files_for_full_load.assert_not_called()
 
 
 @patch("py_load_pubmedcentral.cli.get_db_adapter")
@@ -242,9 +402,10 @@ def test_download_archive_worker_exception(MockS3DataSource, tmp_path):
     assert result is None
 
 
+@patch("py_load_pubmedcentral.cli.logger")
 @patch("py_load_pubmedcentral.cli.get_db_adapter")
 @patch("py_load_pubmedcentral.cli.stream_and_parse_tar_gz_archive")
-def test_parse_archive_worker_exception(mock_stream_and_parse, mock_get_adapter, tmp_path):
+def test_parse_archive_worker_exception(mock_stream_and_parse, mock_get_adapter, mock_logger, tmp_path):
     """
     Tests that the _parse_archive_worker handles exceptions gracefully.
     """
@@ -260,6 +421,8 @@ def test_parse_archive_worker_exception(mock_stream_and_parse, mock_get_adapter,
     result = _parse_archive_worker(dummy_file, {}, tmp_path)
 
     assert result is None
+    mock_logger.error.assert_called_once()
+    assert "Failed to parse archive" in mock_logger.error.call_args[0][0]
 
 
 @patch("py_load_pubmedcentral.cli.get_db_adapter")
