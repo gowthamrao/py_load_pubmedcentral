@@ -5,13 +5,13 @@ import io
 from datetime import date, datetime
 from pathlib import Path
 
-# Although we can't run pytest, we write the tests as if we could.
-# import pytest
+import pytest
 
 from py_load_pubmedcentral.parser import parse_jats_xml
 
 # The path to the test data file
 TEST_XML_PATH = Path(__file__).parent / "test.xml"
+MALFORMED_XML_PATH = Path(__file__).parent / "test_data" / "malformed_article.xml"
 
 
 def test_parse_jats_xml_comprehensive_article():
@@ -150,3 +150,19 @@ def test_parser_is_a_generator():
     except StopIteration:
         # This is the expected outcome
         pass
+
+
+def test_parse_jats_xml_with_unrecoverable_xml():
+    """
+    Tests that the parser yields no results when given a file that is
+    completely un-parseable, even with lxml's recovery mode.
+    """
+    with open(MALFORMED_XML_PATH, "rb") as f:
+        content = f.read()
+
+    # iterparse with recover=True will try its best, but on a completely
+    # garbage file, it should produce an empty iterator, not raise an error.
+    results = list(parse_jats_xml(io.BytesIO(content)))
+
+    # Assert that no articles were yielded from the garbage file.
+    assert len(results) == 0
