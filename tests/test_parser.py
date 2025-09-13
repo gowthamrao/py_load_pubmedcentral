@@ -166,3 +166,22 @@ def test_parse_jats_xml_with_unrecoverable_xml():
 
     # Assert that no articles were yielded from the garbage file.
     assert len(results) == 0
+
+
+def test_parse_jats_xml_with_different_namespace_prefix():
+    """
+    Tests that the parser can correctly extract the license URL when the
+    xlink namespace has a different prefix.
+    """
+    xml_path = Path(__file__).parent / "test_data" / "PMC004_different_prefix.xml"
+    with open(xml_path, "rb") as f:
+        content = f.read()
+    results = list(parse_jats_xml(io.BytesIO(content)))
+
+    assert len(results) == 1
+
+    metadata, _ = results[0]
+
+    assert metadata.pmcid == "PMC004"
+    assert metadata.license_info is not None
+    assert metadata.license_info.url == "http://creativecommons.org/licenses/by/4.0/"

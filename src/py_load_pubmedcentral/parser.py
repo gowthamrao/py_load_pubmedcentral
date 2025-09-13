@@ -139,9 +139,14 @@ def parse_jats_xml(
             if permissions is not None:
                 license_element = permissions.find("license")
                 if license_element is not None:
+                    # Use the namespace map to handle different prefixes for xlink
+                    nsmap = {k: v for k, v in elem.nsmap.items() if k}
+                    href = license_element.get(
+                        "{http://www.w3.org/1999/xlink}href",
+                    )
                     license_info = LicenseInfo(
                         type=license_element.get("license-type"),
-                        url=license_element.get("{http://www.w3.org/1999/xlink}href"),
+                        url=href,
                     )
 
 
