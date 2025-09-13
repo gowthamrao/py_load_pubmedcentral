@@ -174,3 +174,169 @@ def test_writing_models_to_tsv_file():
         assert len(content_lines) == 2
         content1_cols = content_lines[0].split("\t")
         assert "<article" in content1_cols[1]
+
+
+def test_bulk_load_native(db_with_schema: PostgreSQLAdapter):
+    """Tests the native bulk loading of a TSV file."""
+    all_models = _get_test_models()
+    metadata_models = [m[0] for m in all_models]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        metadata_tsv_path = tmp_path / "metadata.tsv"
+
+        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+        with open(metadata_tsv_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(metadata_models, metadata_columns, f)
+
+        db_with_schema.bulk_load_native(str(metadata_tsv_path), "pmc_articles_metadata")
+
+        with db_with_schema.conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM pmc_articles_metadata;")
+            count = cursor.fetchone()[0]
+            assert count == 2
+
+
+def test_bulk_upsert_and_update_state(db_with_schema: PostgreSQLAdapter):
+    """Tests the bulk_upsert_and_update_state function."""
+    all_models = _get_test_models()
+    metadata_models = [m[0] for m in all_models]
+    content_models = [m[1] for m in all_models]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        metadata_tsv_path = tmp_path / "metadata.tsv"
+        content_tsv_path = tmp_path / "content.tsv"
+
+        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+        with open(metadata_tsv_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(metadata_models, metadata_columns, f)
+
+        content_columns = list(PmcArticlesContent.model_fields.keys())
+        with open(content_tsv_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(content_models, content_columns, f)
+
+        run_id = db_with_schema.start_run(run_type="DELTA")
+        db_with_schema.bulk_upsert_and_update_state(
+            run_id, str(metadata_tsv_path), str(content_tsv_path), "file1.xml"
+        )
+
+        with db_with_schema.conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM pmc_articles_metadata;")
+            count = cursor.fetchone()[0]
+            assert count == 2
+
+            cursor.execute("SELECT last_file_processed FROM sync_history WHERE run_id = %s;", (run_id,))
+            last_file = cursor.fetchone()[0]
+            assert last_file == "file1.xml"
+
+
+def test_bulk_insert_from_files_for_full_load(db_with_schema: PostgreSQLAdapter):
+    """Tests the bulk_insert_from_files_for_full_load function."""
+    all_models1 = _get_test_models()
+    metadata_models1 = [m[0] for m in all_models1]
+    content_models1 = [m[1] for m in all_models1]
+
+    # Create a second set of models with different pmcids
+    all_models2 = _get_test_models()
+    metadata_models2 = [m[0] for m in all_models2]
+    content_models2 = [m[1] for m in all_models2]
+    for m in metadata_models2:
+        m.pmcid = f"{m.pmcid}_2"
+    for m in content_models2:
+        m.pmcid = f"{m.pmcid}_2"
+
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        metadata_tsv_path1 = tmp_path / "metadata1.tsv"
+        content_tsv_path1 = tmp_path / "content1.tsv"
+        metadata_tsv_path2 = tmp_path / "metadata2.tsv"
+        content_tsv_path2 = tmp_path / "content2.tsv"
+
+        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+        with open(metadata_tsv_path1, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(metadata_models1, metadata_columns, f)
+        with open(metadata_tsv_path2, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(metadata_models2, metadata_columns, f)
+
+        content_columns = list(PmcArticlesContent.model_fields.keys())
+        with open(content_tsv_path1, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(content_models1, content_columns, f)
+        with open(content_tsv_path2, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(content_models2, content_columns, f)
+
+        db_with_schema.bulk_insert_from_files_for_full_load(
+            [str(metadata_tsv_path1), str(metadata_tsv_path2)],
+            [str(content_tsv_path1), str(content_tsv_path2)],
+        )
+
+        with db_with_schema.conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM pmc_articles_metadata;")
+            count = cursor.fetchone()[0]
+            assert count == 4
+
+
+def test_close(test_db_adapter: PostgreSQLAdapter):
+    """Tests that the close method closes the connection."""
+    # Create a new adapter instance to avoid closing the shared connection
+    adapter = PostgreSQLAdapter(connection_params=test_db_adapter.connection_params)
+    adapter.connect()
+    assert adapter.conn is not None
+    adapter.close()
+    assert adapter.conn is None
+
+
+def test_end_run_no_last_file(db_with_schema: PostgreSQLAdapter):
+    """Tests ending a run without providing a last_file_processed."""
+    run_id = db_with_schema.start_run(run_type="DELTA")
+    db_with_schema.end_run(run_id, "SUCCESS", {"articles": 0})
+
+    with db_with_schema.conn.cursor() as cursor:
+        cursor.execute(
+            "SELECT status, last_file_processed FROM sync_history WHERE run_id = %s;",
+            (run_id,),
+        )
+        status, last_file = cursor.fetchone()
+        assert status == "SUCCESS"
+        assert last_file is None
+
+
+def test_update_run_state(db_with_schema: PostgreSQLAdapter):
+    """Tests the update_run_state function."""
+    run_id = db_with_schema.start_run(run_type="DELTA")
+    db_with_schema.update_run_state(run_id, "file1.xml")
+
+    with db_with_schema.conn.cursor() as cursor:
+        cursor.execute("SELECT last_file_processed FROM sync_history WHERE run_id = %s;", (run_id,))
+        last_file = cursor.fetchone()[0]
+        assert last_file == "file1.xml"
+
+
+def test_bulk_upsert_articles_full_load(db_with_schema: PostgreSQLAdapter):
+    """Tests the bulk_upsert_articles function with is_full_load=True."""
+    all_models = _get_test_models()
+    metadata_models = [m[0] for m in all_models]
+    content_models = [m[1] for m in all_models]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        metadata_tsv_path = tmp_path / "metadata.tsv"
+        content_tsv_path = tmp_path / "content.tsv"
+
+        metadata_columns = list(PmcArticlesMetadata.model_fields.keys())
+        with open(metadata_tsv_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(metadata_models, metadata_columns, f)
+
+        content_columns = list(PmcArticlesContent.model_fields.keys())
+        with open(content_tsv_path, "w", encoding="utf-8") as f:
+            db_with_schema.write_models_to_tsv_file(content_models, content_columns, f)
+
+        db_with_schema.bulk_upsert_articles(
+            str(metadata_tsv_path), str(content_tsv_path), is_full_load=True
+        )
+
+        with db_with_schema.conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM pmc_articles_metadata;")
+            count = cursor.fetchone()[0]
+            assert count == 2
