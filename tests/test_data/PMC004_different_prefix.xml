@@ -1,0 +1,47 @@
+<article xmlns:customlink="http://www.w3.org/1999/xlink">
+  <front>
+    <journal-meta>
+      <journal-id>Test J</journal-id>
+      <journal-title-group>
+        <journal-title>Journal of Test Data</journal-title>
+      </journal-title-group>
+      <issn pub-type="epub">1234-5678</issn>
+      <publisher>
+        <publisher-name>Test Publisher</publisher-name>
+      </publisher>
+    </journal-meta>
+    <article-meta>
+      <article-id pub-id-type="pmc">PMC004</article-id>
+      <article-id pub-id-type="pmid">10004</article-id>
+      <article-id pub-id-type="doi">10.1000/test.4</article-id>
+      <title-group>
+        <article-title>The Science of Namespace Prefixes</article-title>
+      </title-group>
+      <contrib-group>
+        <contrib contrib-type="author">
+          <name>
+            <surname>Doe</surname>
+            <given-names>Jane</given-names>
+          </name>
+          <aff>XML University</aff>
+        </contrib>
+      </contrib-group>
+      <pub-date pub-type="epub">
+        <day>04</day>
+        <month>04</month>
+        <year>2023</year>
+      </pub-date>
+      <abstract>
+        <p>This is the abstract for the article with a different namespace prefix.</p>
+      </abstract>
+      <permissions>
+        <license license-type="cc-by" customlink:href="http://creativecommons.org/licenses/by/4.0/">
+          <license-p>This is an open-access article distributed under the terms of the Creative Commons Attribution License.</license-p>
+        </license>
+      </permissions>
+    </article-meta>
+  </front>
+  <body>
+    <p>This is the full text of the article with a different namespace prefix (PMC004).</p>
+  </body>
+</article>

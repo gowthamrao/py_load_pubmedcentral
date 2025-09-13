@@ -5,13 +5,13 @@ import io
 from datetime import date, datetime
 from pathlib import Path
 
-# Although we can't run pytest, we write the tests as if we could.
-# import pytest
+import pytest
 
 from py_load_pubmedcentral.parser import parse_jats_xml
 
 # The path to the test data file
 TEST_XML_PATH = Path(__file__).parent / "test.xml"
+MALFORMED_XML_PATH = Path(__file__).parent / "test_data" / "malformed_article.xml"
 
 
 def test_parse_jats_xml_comprehensive_article():
@@ -150,3 +150,65 @@ def test_parser_is_a_generator():
     except StopIteration:
         # This is the expected outcome
         pass
+
+
+def test_parse_jats_xml_with_unrecoverable_xml():
+    """
+    Tests that the parser yields no results when given a file that is
+    completely un-parseable, even with lxml's recovery mode.
+    """
+    with open(MALFORMED_XML_PATH, "rb") as f:
+        content = f.read()
+
+    # iterparse with recover=True will try its best, but on a completely
+    # garbage file, it should produce an empty iterator, not raise an error.
+    results = list(parse_jats_xml(io.BytesIO(content)))
+
+    # Assert that no articles were yielded from the garbage file.
+    assert len(results) == 0
+
+
+def test_parse_jats_xml_with_different_namespace_prefix():
+    """
+    Tests that the parser can correctly extract the license URL when the
+    xlink namespace has a different prefix.
+    """
+    xml_path = Path(__file__).parent / "test_data" / "PMC004_different_prefix.xml"
+    with open(xml_path, "rb") as f:
+        content = f.read()
+    results = list(parse_jats_xml(io.BytesIO(content)))
+
+    assert len(results) == 1
+
+    metadata, _ = results[0]
+
+    assert metadata.pmcid == "PMC004"
+    assert metadata.license_info is not None
+    assert metadata.license_info.url == "http://creativecommons.org/licenses/by/4.0/"
+
+
+def test_parse_jats_xml_with_special_characters():
+    """
+    Tests that the parser correctly handles XML entities and unicode characters
+    in the text content of various fields.
+    """
+    xml_path = Path(__file__).parent / "test_data" / "special_chars_article.xml"
+    with open(xml_path, "rb") as f:
+        content = f.read()
+    results = list(parse_jats_xml(io.BytesIO(content)))
+
+    # Check that one article was parsed
+    assert len(results) == 1
+
+    metadata, _ = results[0]
+
+    # Check IDs
+    assert metadata.pmcid == "PMC_SPECIAL1"
+
+    # Check content with special characters
+    # The parser should decode the XML entities back to their original characters
+    expected_title = "Test: \"Special\" Characters & Entities Like < & >'"
+    assert metadata.title == expected_title
+
+    expected_abstract = "This abstract tests escaped entities like & and unicode characters like α, β, & γ."
+    assert metadata.abstract_text == expected_abstract
