@@ -185,3 +185,30 @@ def test_parse_jats_xml_with_different_namespace_prefix():
     assert metadata.pmcid == "PMC004"
     assert metadata.license_info is not None
     assert metadata.license_info.url == "http://creativecommons.org/licenses/by/4.0/"
+
+
+def test_parse_jats_xml_with_special_characters():
+    """
+    Tests that the parser correctly handles XML entities and unicode characters
+    in the text content of various fields.
+    """
+    xml_path = Path(__file__).parent / "test_data" / "special_chars_article.xml"
+    with open(xml_path, "rb") as f:
+        content = f.read()
+    results = list(parse_jats_xml(io.BytesIO(content)))
+
+    # Check that one article was parsed
+    assert len(results) == 1
+
+    metadata, _ = results[0]
+
+    # Check IDs
+    assert metadata.pmcid == "PMC_SPECIAL1"
+
+    # Check content with special characters
+    # The parser should decode the XML entities back to their original characters
+    expected_title = "Test: \"Special\" Characters & Entities Like < & >'"
+    assert metadata.title == expected_title
+
+    expected_abstract = "This abstract tests escaped entities like & and unicode characters like α, β, & γ."
+    assert metadata.abstract_text == expected_abstract

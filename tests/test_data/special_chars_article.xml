@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<articleset>
+  <article>
+    <front>
+      <journal-meta>
+        <journal-title-group>
+          <journal-title>Journal of Special Characters</journal-title>
+        </journal-title-group>
+        <publisher>
+          <publisher-name>Entity Publishing</publisher-name>
+        </publisher>
+      </journal-meta>
+      <article-meta>
+        <article-id pub-id-type="pmc">PMC_SPECIAL1</article-id>
+        <title-group>
+          <article-title>Test: "Special" Characters &amp; Entities Like &lt; &amp; &gt;'</article-title>
+        </title-group>
+        <contrib-group>
+          <contrib contrib-type="author">
+            <name>
+              <surname>Entity</surname>
+              <given-names>Anna</given-names>
+            </name>
+          </contrib>
+        </contrib-group>
+        <pub-date pub-type="epub">
+          <year>2025</year>
+        </pub-date>
+        <abstract>
+          <p>This abstract tests escaped entities like &amp; and unicode characters like α, β, &amp; γ.</p>
+        </abstract>
+        <permissions>
+            <license license-type="open-access" xlink:href="http://creativecommons.org/licenses/by/4.0/" xmlns:xlink="http://www.w3.org/1999/xlink">
+                <p>CC BY 4.0</p>
+            </license>
+        </permissions>
+      </article-meta>
+    </front>
+    <body>
+      <p>Body text.</p>
+    </body>
+  </article>
+</articleset>
